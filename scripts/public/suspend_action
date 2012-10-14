@@ -22,8 +22,10 @@ PmLogCtl -s def sleepdscript info
 
 PmLogCtl -s logkv sleepdscript info "sleepd: System going to sleep now"
 
-# Initiate suspend
-echo mem > /sys/power/state
+# Wakelockd will do all the suspend handling for us and exit once we should wake up again.
+# Suspend is asynchronous as we're normally placed on an android based system which uses
+# wakelocks.
+/usr/sbin/wakelockd
 
 PmLogCtl -s logkv sleepdscript info "sleepd: System woke up"
 
