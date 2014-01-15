@@ -201,6 +201,8 @@ struct timespec sTimeOnWake;
 struct timespec sSuspendRTC;
 struct timespec sWakeRTC;
 
+bool gDisplayIsOn = true;
+
 void SuspendIPCInit(void);
 int SendSuspendRequest(const char *message);
 int SendPrepareSuspend(const char *message);
@@ -231,26 +233,13 @@ ScheduleIdleCheck(int interval_ms, bool fromPoll)
 	}
 }
 
-static nyx_device_handle_t nyxDev = NULL;
-
 /**
  * @brief Get display status using NYX interface.
  */
 static bool
 IsDisplayOn(void)
 {
-	nyx_led_controller_state_t state = NYX_LED_CONTROLLER_STATE_UNKNOWN;
-
-	if (nyxDev)
-	{
-		nyx_led_controller_get_state(nyxDev, NYX_LED_CONTROLLER_LCD, &state);
-	}
-	else
-	{
-		state = NYX_LED_CONTROLLER_STATE_ON;
-	}
-
-	return (state == NYX_LED_CONTROLLER_STATE_ON);
+	return gDisplayIsOn;
 }
 
 /**
@@ -259,17 +248,8 @@ IsDisplayOn(void)
 void
 switchoffDisplay(void)
 {
-	if (nyxDev)
-	{
-		nyx_led_controller_effect_t effect;
-		effect.required.effect = NYX_LED_CONTROLLER_EFFECT_LED_SET;
-		effect.required.led = NYX_LED_CONTROLLER_LCD;
-		effect.backlight.callback = NULL;
-		effect.backlight.brightness_lcd = -1;
-		nyx_led_controller_execute_effect(nyxDev, effect);
-	}
-
-	return;
+	LSCallOneReply(GetLunaServiceHandle(), "luna://com.palm.display/control/setState",
+		"{\"state\":\"off\"}", NULL, NULL, NULL, NULL);
 }
 
 
@@ -889,6 +869,50 @@ StateActivityResume(void)
 	return _stateResume(kResumeTypeActivity);
 }
 
+static bool
+DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
+{
+	struct json_object *root_obj;
+	struct json_object *state_obj;
+	struct json_object *event_obj;
+	const char *state;
+	const char *event;
+
+	root_obj = json_tokener_parse(LSMessageGetPayload(message));
+	if (!root_obj) {
+		SLEEPDLOG_DEBUG("Failed to parse response from display manager");
+		return true;
+	}
+
+	/* NOTE: When we first call com.palm.display/control/status we will get a response
+	 * which has the state field set. Afterwards we only get response with the event field
+	 * set. */
+
+	state_obj = json_object_object_get(root_obj, "state");
+	if (state_obj) {
+		state = json_object_get_string(state_obj);
+
+		if (strncmp(state, "off", 3) == 0)
+			gDisplayIsOn = false;
+		else if (strncmp(state, "on", 2) == 0 || strncmp(state, "dimmed", 6) == 0)
+			gDisplayIsOn = true;
+	}
+
+	event_obj = json_object_object_get(root_obj, "event");
+	if (event_obj) {
+		event = json_object_get_string(event_obj);
+		if (strncmp(event, "displayOn", 9) == 0)
+			gDisplayIsOn = true;
+		else if (strncmp(event, "displayOff", 10) == 0 ||
+				 strncmp(event, "displayInactive", 15) == 0)
+			gDisplayIsOn = false;
+	}
+
+	json_object_put(root_obj);
+
+	return true;
+}
+
 /**
  * @brief Initialize the Suspend/Resume state machine.
  */
@@ -925,18 +949,20 @@ SuspendInit(void)
 
 	gCurrentStateNode = kStateMachine[kPowerStateOn];
 
+	LSError lserror;
+	LSErrorInit(&lserror);
+	if (!LSCall(GetLunaServiceHandle(), "luna://com.palm.display/control/status",
+				"{\"subscribe\":true}", DisplayStatusCb, NULL, NULL, &lserror))
+	{
+		SLEEPDLOG_WARNING(MSGID_SUBSCRIBE_DISP_MGR_FAIL, 0, "Failed to subscribe for display status updates");
+		LSErrorFree(&lserror);
+	}
+
 	if (pthread_create(&suspend_tid, NULL, SuspendThread, NULL))
 	{
 		SLEEPDLOG_CRITICAL(MSGID_PTHREAD_CREATE_FAIL, 0,
 		                   "Could not create SuspendThread\n");
 		abort();
-	}
-
-	int ret = nyx_device_open(NYX_DEVICE_LED_CONTROLLER, "Default", &nyxDev);
-
-	if (ret != NYX_ERROR_NONE)
-	{
-		SLEEPDLOG_DEBUG("Unable to open the nyx device led controller");
 	}
 
 	return 0;
