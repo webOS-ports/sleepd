@@ -935,18 +935,6 @@ SuspendInit(void)
 
 	SuspendIPCInit();
 
-	if (gSleepConfig.visual_leds_suspend)
-	{
-		if (SysfsWriteString("/sys/class/leds/core_navi_center/brightness", "15") < 0)
-		{
-			SysfsWriteString(
-			    "/sys/class/leds/core_navi_left/brightness", "100");
-			SysfsWriteString(
-			    "/sys/class/leds/core_navi_right/brightness", "100");
-
-		}
-	}
-
 	gCurrentStateNode = kStateMachine[kPowerStateOn];
 
 	LSError lserror;
