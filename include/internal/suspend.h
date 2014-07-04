@@ -43,9 +43,10 @@ typedef int PowerEvent;
 
 void ScheduleIdleCheck(int interval_ms, bool fromPoll);
 void TriggerSuspend(const char *cause, PowerEvent power_event);
+void TriggerResume(const char *cause, PowerEvent power_event);
 bool GetSuspendSettings(LSHandle *sh, LSMessage *message, void *ctx);
 bool DisplayStatus(LSHandle *sh, LSMessage *message, void *user_data);
 int com_palm_suspend_lunabus_init(void);
-void switchoffDisplay(void);
+bool IsSuspended(void);
 
 #endif

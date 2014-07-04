@@ -27,7 +27,9 @@ bool MachineCanSleep(void);
 
 const char *MachineCantSleepReason(void);
 
-void MachineSleep(void);
+bool MachineSleep(void);
+
+void MachineWakeup(void);
 
 void MachineForceReboot(const char *reason);
 

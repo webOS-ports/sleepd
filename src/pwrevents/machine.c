@@ -118,11 +118,7 @@ unknown:
 bool
 MachineCanSleep(void)
 {
-	int ret = access(WEBOS_INSTALL_SBINDIR "/suspend_action", R_OK | X_OK);
-	bool suspend_action_present = (ret == 0);
-
-	return suspend_action_present &&
-	       (!chargerIsConnected || gSleepConfig.suspend_with_charger);
+	return (!chargerIsConnected || gSleepConfig.suspend_with_charger);
 }
 
 const char *
@@ -130,34 +126,31 @@ MachineCantSleepReason(void)
 {
 	static char reason[512];
 
-	int ret = access(WEBOS_INSTALL_SBINDIR "/suspend_action", R_OK | X_OK);
-	bool suspend_action_present = (ret == 0);
-
-	snprintf(reason, 512, "%s %s",
-	         !suspend_action_present ?
-	         "suspend_action_not_present," : "",
-	         chargerIsConnected ? "charger_present" : "");
+	snprintf(reason, 512, "%s", chargerIsConnected ? "charger_present" : "");
 
 	return reason;
 }
 
-
-void MachineSleep(void)
+bool MachineSleep(void)
 {
-	bool success;
-	switchoffDisplay();
+	bool success = false;
+	nyx_error_t error = NYX_ERROR_NONE;
 
-	if (gSleepConfig.visual_leds_suspend)
-	{
-		SysfsWriteString("/sys/class/leds/core_navi_center/brightness", "0");
+	error = nyx_system_suspend_async(GetNyxSystemDevice(), &success);
+
+	if (error != NYX_ERROR_NONE) {
+		SLEEPDLOG_DEBUG("NYX: failed to suspend (error %d)", error);
+		return false;
 	}
 
-	nyx_system_suspend(GetNyxSystemDevice(), &success);
+	return success;
+}
 
-	if (gSleepConfig.visual_leds_suspend)
-	{
-		SysfsWriteString("/sys/class/leds/core_navi_center/brightness", "15");
-	}
+void MachineWakeup(void)
+{
+	bool success = false;
+
+	nyx_system_resume(GetNyxSystemDevice(), &success);
 }
 
 void
