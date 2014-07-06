@@ -505,19 +505,8 @@ void read_proc_net_dev()
 
 void get_battery_coulomb_reading(double *rc, double *c)
 {
-#define SYSFS_A6_DEVICE     "/sys/class/misc/a6_0/regs/"
-#define DEF_BATTERY_PATH    "/sys/devices/w1 bus master/w1_master_slaves/"
-
-	if (g_file_test(SYSFS_A6_DEVICE, G_FILE_TEST_IS_DIR))
-	{
-		SysfsGetDouble(SYSFS_A6_DEVICE "getrawcoulomb", rc);
-		SysfsGetDouble(SYSFS_A6_DEVICE "getcoulomb", c);
-	}
-	else
-	{
-		SysfsGetDouble(DEF_BATTERY_PATH "getrawcoulomb", rc);
-		SysfsGetDouble(DEF_BATTERY_PATH "getcoulomb", c);
-	}
+	*rc = 0.0;
+	*c = 0.0;
 }
 
 gboolean
