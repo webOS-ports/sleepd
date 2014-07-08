@@ -252,6 +252,8 @@ ScheduleIdleCheck(int interval_ms, bool fromPoll)
 {
 	if (idle_scheduler)
 	{
+		SLEEPDLOG_DEBUG("Scheduling new ilde check in %d ms", interval_ms);
+
 		g_timer_source_set_interval(idle_scheduler, interval_ms, fromPoll);
 	}
 	else
@@ -288,8 +290,12 @@ IdleCheck(gpointer ctx)
 		return FALSE;
 	}
 
+	SLEEPDLOG_DEBUG("IdleCheck: state %s", StateToStr(gCurrentStateNode.state));
+
 	if (!IsDisplayOn())
 	{
+		SLEEPDLOG_DEBUG("IdleCheck: display off");
+
 		ClockGetTime(&now);
 
 		/*
@@ -428,7 +434,6 @@ SuspendThread(void *ctx)
 	context = g_main_context_new();
 
 	suspend_loop = g_main_loop_new(context, FALSE);
-	g_main_context_unref(context);
 
 	idle_scheduler = g_timer_source_new(
 				gSleepConfig.wait_idle_ms, gSleepConfig.wait_idle_granularity_ms);
@@ -437,10 +442,14 @@ SuspendThread(void *ctx)
 						  IdleCheck, NULL, NULL);
 	g_source_attach((GSource *)idle_scheduler,
 					g_main_loop_get_context(suspend_loop));
-	g_source_unref((GSource *)idle_scheduler);
 
 	g_main_loop_run(suspend_loop);
+
+	g_source_unref((GSource *)idle_scheduler);
+
 	g_main_loop_unref(suspend_loop);
+
+	g_main_context_unref(context);
 
 	return NULL;
 }
@@ -1014,9 +1023,6 @@ void
 TriggerResume(const char *reason, PowerEvent event)
 {
 	SLEEPDLOG_DEBUG("%s: state %s", __PRETTY_FUNCTION__, StateToStr(gCurrentStateNode.state));
-
-	// We woke up from sleep.
-	PwrEventThawActivities();
 
 	GSource *source = g_idle_source_new();
 	g_source_set_callback(source,
