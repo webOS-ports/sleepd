@@ -252,7 +252,7 @@ ScheduleIdleCheck(int interval_ms, bool fromPoll)
 {
 	if (idle_scheduler)
 	{
-		SLEEPDLOG_DEBUG("Scheduling new ilde check in %d ms", interval_ms);
+		SLEEPDLOG_DEBUG("Scheduling new idle check in %d ms", interval_ms);
 
 		g_timer_source_set_interval(idle_scheduler, interval_ms, fromPoll);
 	}
@@ -287,7 +287,7 @@ IdleCheck(gpointer ctx)
 
 	if (gCurrentStateNode.state == kPowerStateKernelResume) {
 		SLEEPDLOG_DEBUG("Not rescheduling idle check cause we're in sleep mode");
-		return FALSE;
+		return TRUE;
 	}
 
 	SLEEPDLOG_DEBUG("IdleCheck: state %s", StateToStr(gCurrentStateNode.state));
@@ -501,6 +501,7 @@ StateOnIdle(void)
 {
 	if (!MachineCanSleep())
 	{
+		SLEEPDLOG_DEBUG("Aborting suspend as machine not ready to sleep (charger plugged in?)");
 		return kPowerStateOn;
 	}
 
