@@ -689,11 +689,15 @@ PwrEventActivityGetMaxDuration(struct timespec *now)
 bool
 PwrEventFreezeActivities(struct timespec *now)
 {
+#if 0
 	pthread_mutex_lock(&activity_mutex);
+#endif
 
 	if (_activity_obtain_min_unlocked(now) != NULL)
 	{
+#if 0
 		pthread_mutex_unlock(&activity_mutex);
+#endif
 		return false;
 	}
 
@@ -709,7 +713,9 @@ void
 PwrEventThawActivities(void)
 {
 	gFrozen = false;
+#if 0
 	pthread_mutex_unlock(&activity_mutex);
+#endif
 }
 
 INIT_FUNC(INIT_FUNC_EARLY, _activity_init);

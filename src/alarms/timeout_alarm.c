@@ -47,6 +47,7 @@
 #include "config.h"
 #include "init.h"
 #include "timesaver.h"
+#include "suspend.h"
 
 #define LOG_DOMAIN "ALARMS-TIMEOUT: "
 
@@ -158,7 +159,13 @@ static void _update_timeouts(void);
 static void _rtc_alarm_fired(nyx_device_handle_t handle,
                              nyx_callback_status_t status, void *data)
 {
+	SLEEPDLOG_DEBUG("RTC alarm fired");
+
+	TriggerResume("rtc", kPowerEventNone);
+
+#if 0
 	_update_timeouts();
+#endif
 }
 
 
@@ -557,10 +564,11 @@ _queue_next_wakeup(bool set_callback_fn)
 
 		time_t rtc_expiry = expiry + (rtctime - reference_time());
 
+		SLEEPDLOG_DEBUG("Setting new RTC alarm at %d", rtc_expiry);
+
 		// setup RTC alarm
 		nyx_error = nyx_system_set_alarm(GetNyxSystemDevice(), rtc_expiry,
-		                                 set_callback_fn ? _rtc_alarm_fired : NULL,
-		                                 NULL);
+										 _rtc_alarm_fired, NULL);
 
 		if (nyx_error != NYX_ERROR_NONE)
 		{
