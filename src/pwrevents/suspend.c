@@ -946,8 +946,7 @@ DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
 		event = json_object_get_string(event_obj);
 		if (strncmp(event, "displayOn", 9) == 0)
 			gDisplayIsOn = true;
-		else if (strncmp(event, "displayOff", 10) == 0 ||
-				 strncmp(event, "displayInactive", 15) == 0)
+		else if (strncmp(event, "displayOff", 10) == 0)
 			gDisplayIsOn = false;
 	}
 
