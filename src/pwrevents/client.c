@@ -29,9 +29,10 @@
 
 #include <glib.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "logging.h"
-#include "debug.h"
+#include "sleepd_debug.h"
 #include "client.h"
 
 #define LOG_DOMAIN "PWREVENT-CLIENT: "

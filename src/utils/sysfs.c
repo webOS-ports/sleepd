@@ -35,7 +35,7 @@
 #include <glib.h>
 
 #include "logging.h"
-#include "debug.h"
+#include "sleepd_debug.h"
 
 #define LOG_DOMAIN "sysfs:"
 

@@ -23,7 +23,7 @@
 #include "init.h"
 #include "config.h"
 #include "machine.h"
-#include "debug.h"
+#include "sleepd_debug.h"
 #include "logging.h"
 
 typedef struct _GNamedHookList

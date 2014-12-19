@@ -29,7 +29,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
-#include <cjson/json.h>
+#include <json.h>
 #include <luna-service2/lunaservice.h>
 
 #include "main.h"
@@ -39,7 +39,7 @@
 #include "sysfs.h"
 
 #include "machine.h"
-#include "debug.h"
+#include "sleepd_debug.h"
 #include "logging.h"
 #include "suspend.h"
 #include "config.h"

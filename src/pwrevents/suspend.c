@@ -40,7 +40,7 @@
 #include "clock.h"
 #include "wait.h"
 #include "machine.h"
-#include "debug.h"
+#include "sleepd_debug.h"
 #include "main.h"
 #include "timersource.h"
 #include "activity.h"
@@ -55,7 +55,7 @@
 #include "sawmill_logger.h"
 #include "nyx/nyx_client.h"
 
-#include <cjson/json.h>
+#include <json.h>
 #include <luna-service2/lunaservice.h>
 
 #define LOG_DOMAIN "PWREVENT-SUSPEND: "

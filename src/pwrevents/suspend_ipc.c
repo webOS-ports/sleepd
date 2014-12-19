@@ -25,13 +25,14 @@
  */
 
 #include <syslog.h>
-#include <cjson/json.h>
+#include <string.h>
+#include <json.h>
 #include <luna-service2/lunaservice.h>
 
 #include "wait.h"
 #include "init.h"
 #include "main.h"
-#include "debug.h"
+#include "sleepd_debug.h"
 #include "client.h"
 #include "shutdown.h"
 #include "suspend.h"

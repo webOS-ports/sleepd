@@ -26,12 +26,13 @@
 */
 
 #include <glib.h>
-#include <cjson/json.h>
+#include <json.h>
 #include <syslog.h>
+#include <string.h>
 #include <luna-service2/lunaservice.h>
 
 #include "lunaservice_utils.h"
-#include "debug.h"
+#include "sleepd_debug.h"
 #include "main.h"
 #include "logging.h"
 #include "machine.h"
