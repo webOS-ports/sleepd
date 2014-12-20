@@ -41,4 +41,6 @@ void TurnBypassOff(void);
 
 int MachineGetToken(const char *token_name, char *buf, int len);
 
+bool MachineSupportsWakelocks(void);
+
 #endif // _MACHINE_H_

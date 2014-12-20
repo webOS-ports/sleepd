@@ -762,6 +762,15 @@ InstrumentOnWake(int resumeType)
 }
 
 
+static bool
+CheckActivitiesActive(struct timespec *now)
+{
+	if (MachineSupportsWakelocks())
+		return PwrEventActivityCheckActivitiesActive(now);
+
+	return PwrEventFreezeActivities(now);
+}
+
 /**
  * @brief In this state it will first send the "Suspended" signal to everybody. If any activity is active
  * at this point it will go resume by going to the "ActivityResume" state, else it will set the next state
@@ -800,7 +809,7 @@ StateSleep(void)
 
 	// if any activities were started, abort suspend.
 	if (gSuspendEvent != kPowerEventForceSuspend &&
-			!PwrEventFreezeActivities(&sTimeOnSuspended))
+			!CheckActivitiesActive(&sTimeOnSuspended))
 	{
 		SLEEPDLOG_DEBUG("aborting sleep because of current activity");
 		PwrEventActivityPrintFrom(&sTimeOnSuspended);
@@ -845,7 +854,8 @@ StateAbortSuspend(void)
 {
 	PMLOG_TRACE("State Abort suspend");
 
-	PwrEventThawActivities();
+	if (!MachineSupportsWakelocks())
+		PwrEventThawActivities();
 
 	SendResume(kResumeAbortSuspend, "resume (suspend aborted)");
 
@@ -866,7 +876,8 @@ _stateResume(int resumeType)
 
 	MachineWakeup();
 
-	PwrEventThawActivities();
+	if (!MachineSupportsWakelocks())
+		PwrEventThawActivities();
 
 	char *resumeDesc = g_strdup_printf("resume (%s)",
 									   resume_type_descriptions[resumeType]);
@@ -1031,7 +1042,6 @@ TriggerResume(const char *reason, PowerEvent event)
 
 	g_source_unref(source);
 }
-
 /**
  * @brief Check if the device is currently in a low power mode
  *

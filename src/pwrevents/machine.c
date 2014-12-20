@@ -61,6 +61,8 @@ bool usbconn = false;
  */
 bool dockconn = false;
 
+bool machineSupportsWakelocks = false;
+
 /**
  * Obtains the machine specific release name.
  * For e.g. If uname -r returns "2.6.22.1-11-palm-joplin-2430",
@@ -113,6 +115,19 @@ MachineGetName(void)
 unknown:
 	machineName = "unknown";
 	return machineName;
+}
+
+bool MachineSupportsWakelocks(void)
+{
+	static bool initialized = false;
+	if (!initialized)
+	{
+		machineSupportsWakelocks =  g_file_test("/sys/power/wake_lock", (GFileTest)(G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR));
+		SLEEPDLOG_DEBUG("System %s wakelocks", machineSupportsWakelocks ? "supports" : "does not support");
+		initialized = true;
+	}
+
+	return machineSupportsWakelocks;
 }
 
 bool
