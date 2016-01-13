@@ -122,3 +122,4 @@ webos_build_system_bus_files()
 webos_config_build_doxygen(doc Doxyfile)
 
 install(FILES files/conf/sleepd.conf DESTINATION ${WEBOS_INSTALL_DEFAULTCONFDIR})
+install(FILES files/conf/alarms.xml DESTINATION ${WEBOS_INSTALL_PREFERENCESDIR}/com.palm.sleep)
