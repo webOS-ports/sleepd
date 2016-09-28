@@ -1,0 +1,12 @@
+[Unit]
+Description=Open webOS daemon to manage device suspend-resume cycles
+After=activitymanager.service
+Requires=activitymanager.service
+
+[Service]
+Type=simple
+Restart=on-failure
+ExecStart=/usr/sbin/sleepd
+
+[Install]
+WantedBy=multi-user.target
