@@ -75,7 +75,7 @@ clientCancelByName(LSHandle *sh, LSMessage *message, void *ctx)
 {
 	struct json_object *object = json_tokener_parse(LSMessageGetPayload(message));
 
-	if (is_error(object))
+	if (!object)
 	{
 		goto out;
 	}
@@ -88,7 +88,7 @@ clientCancelByName(LSHandle *sh, LSMessage *message, void *ctx)
 
 out:
 
-	if (!is_error(object))
+	if (object)
 	{
 		json_object_put(object);
 	}
@@ -131,7 +131,7 @@ activityStartCallback(LSHandle *sh, LSMessage *message, void *user_data)
 
 	struct json_object *object = json_tokener_parse(payload);
 
-	if (is_error(object))
+	if (!object)
 	{
 		goto malformed_json;
 	}
@@ -175,7 +175,7 @@ malformed_json:
 	goto end;
 end:
 
-	if (!is_error(object))
+	if (object)
 	{
 		json_object_put(object);
 	}
@@ -200,7 +200,7 @@ activityEndCallback(LSHandle *sh, LSMessage *message, void *user_data)
 
 	struct json_object *object = json_tokener_parse(payload);
 
-	if (is_error(object))
+	if (!object)
 	{
 		goto malformed_json;
 	}
@@ -223,7 +223,7 @@ malformed_json:
 	goto end;
 end:
 
-	if (!is_error(object))
+	if (object)
 	{
 		json_object_put(object);
 	}
@@ -250,7 +250,7 @@ identifyCallback(LSHandle *sh, LSMessage *message, void *data)
 
 	struct json_object *object = json_tokener_parse(payload);
 
-	if (is_error(object))
+	if (!object)
 	{
 		goto malformed_json;
 	}
@@ -321,7 +321,7 @@ malformed_json:
 	goto end;
 end:
 
-	if (!is_error(object))
+	if (object)
 	{
 		json_object_put(object);
 	}
@@ -516,7 +516,7 @@ suspendRequestRegister(LSHandle *sh, LSMessage *message, void *data)
 	struct json_object *object = json_tokener_parse(
 	                                 LSMessageGetPayload(message));
 
-	if (is_error(object))
+	if (!object)
 	{
 		goto malformed_json;
 	}
@@ -553,7 +553,7 @@ malformed_json:
 	goto end;
 end:
 
-	if (!is_error(object))
+	if (object)
 	{
 		json_object_put(object);
 	}
@@ -577,7 +577,7 @@ suspendRequestAck(LSHandle *sh, LSMessage *message, void *data)
 	struct json_object *object = json_tokener_parse(
 	                                 LSMessageGetPayload(message));
 
-	if (is_error(object))
+	if (!object)
 	{
 		goto malformed_json;
 	}
@@ -630,7 +630,7 @@ invalid_syntax:
 	goto end;
 end:
 
-	if (!is_error(object))
+	if (object)
 	{
 		json_object_put(object);
 	}
@@ -657,7 +657,7 @@ prepareSuspendRegister(LSHandle *sh, LSMessage *message, void *data)
 	struct json_object *object = json_tokener_parse(
 	                                 LSMessageGetPayload(message));
 
-	if (is_error(object))
+	if (!object)
 	{
 		goto malformed_json;
 	}
@@ -694,7 +694,7 @@ malformed_json:
 	goto end;
 end:
 
-	if (!is_error(object))
+	if (object)
 	{
 		json_object_put(object);
 	}
@@ -718,7 +718,7 @@ prepareSuspendAck(LSHandle *sh, LSMessage *message, void *data)
 	struct json_object *object = json_tokener_parse(
 	                                 LSMessageGetPayload(message));
 
-	if (is_error(object))
+	if (!object)
 	{
 		goto malformed_json;
 	}
@@ -770,7 +770,7 @@ malformed_json:
 	goto end;
 end:
 
-	if (!is_error(object))
+	if (object)
 	{
 		json_object_put(object);
 	}
@@ -793,7 +793,7 @@ visualLedSuspendCallback(LSHandle *sh, LSMessage *message, void *data)
 	struct json_object *object = json_tokener_parse(
 	                                 LSMessageGetPayload(message));
 
-	if (is_error(object))
+	if (!object)
 	{
 		goto malformed_json;
 	}
@@ -817,7 +817,7 @@ malformed_json:
 	goto end;
 end:
 
-	if (!is_error(object))
+	if (object)
 	{
 		json_object_put(object);
 	}
