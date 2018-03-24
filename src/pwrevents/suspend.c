@@ -929,8 +929,11 @@ DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
 	struct json_object *root_obj;
 	struct json_object *state_obj;
 	struct json_object *event_obj;
+	struct json_object *blockDisplay_obj;
 	const char *state;
 	const char *event;
+	const char *blockDisplay;
+	static bool isDNAST = false;
 
 	root_obj = json_tokener_parse(LSMessageGetPayload(message));
 	if (!root_obj) {
@@ -960,6 +963,18 @@ DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
 		else if (strncmp(event, "displayOff", 10) == 0)
 			gDisplayIsOn = false;
 	}
+
+	blockDisplay_obj = json_object_object_get(root_obj, "blockDisplay");
+	if (blockDisplay_obj) {
+		blockDisplay = json_object_get_string(blockDisplay_obj);
+		if (strncmp(blockDisplay, "true", 4) == 0)
+			isDNAST=true;
+		else if (strncmp(blockDisplay, "false", 5) == 0)
+			isDNAST=false;
+	}
+
+	if (isDNAST)
+		gDisplayIsOn = true;
 
 	SLEEPDLOG_DEBUG("Display status is now %s", gDisplayIsOn ? "on" : "off");
 
