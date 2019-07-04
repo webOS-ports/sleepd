@@ -62,11 +62,25 @@ MachineCantSleepReason(void)
 }
 
 
-void MachineSleep(void)
+bool MachineSleep(void)
 {
-    bool success;
+    bool success = false;
+    nyx_error_t error = NYX_ERROR_NONE;
 
-    nyx_system_suspend(GetNyxSystemDevice(), &success);
+    error = nyx_system_suspend_async(GetNyxSystemDevice(), &success);
+    if (error != NYX_ERROR_NONE) {
+        SLEEPDLOG_DEBUG("NYX: failed to suspend (error %d)", error);
+        return false;
+    }
+
+    return success;
+}
+
+void MachineWakeup(void)
+{
+    bool success = false;
+
+    nyx_system_resume(GetNyxSystemDevice(), &success);
 }
 
 void
