@@ -356,6 +356,32 @@ forceSuspendCallback(LSHandle *sh, LSMessage *message, void *user_data)
 }
 
 /**
+ * @brief Resume the device when it is currently in a low power state.
+ *
+ * @param  sh
+ * @param  message
+ * @param  user_data
+ */
+
+bool
+resumeCallback(LSHandle *sh, LSMessage *message, void *user_data)
+{
+    PMLOG_TRACE("Received resume");
+
+    if (!IsSuspended()) {
+        LSMessageReplyErrorUnknown(sh, message);
+        return true;
+    }
+
+    /* FIXME get reason as argument from the caller */
+    TriggerResume(NULL, kPowerEventNone);
+
+    LSMessageReplySuccess(sh, message);
+
+    return true;
+}
+
+/**
  * @brief Schedule the IdleCheck thread to check if the device can suspend
  * (Used for testing purposes).
  *
@@ -805,6 +831,7 @@ LSMethod com_palm_suspend_methods[] =
 
     /* suspend methods*/
 
+
     { "suspendRequestRegister", suspendRequestRegister,LUNA_METHOD_FLAG_DEPRECATED },
     { "prepareSuspendRegister", prepareSuspendRegister,LUNA_METHOD_FLAG_DEPRECATED },
     { "suspendRequestAck", suspendRequestAck,LUNA_METHOD_FLAG_DEPRECATED },
@@ -812,6 +839,7 @@ LSMethod com_palm_suspend_methods[] =
     { "forceSuspend", forceSuspendCallback,LUNA_METHOD_FLAG_DEPRECATED },
     { "identify", identifyCallback,LUNA_METHOD_FLAG_DEPRECATED },
     { "clientCancelByName", clientCancelByName,LUNA_METHOD_FLAG_DEPRECATED },
+    { "resume", resumeCallback,LUNA_METHOD_FLAG_DEPRECATED },
 
     { "activityStart", activityStartCallback,LUNA_METHOD_FLAG_DEPRECATED },
     { "activityEnd", activityEndCallback, LUNA_METHOD_FLAG_DEPRECATED },
