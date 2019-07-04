@@ -116,6 +116,7 @@
 /** suspend.c */
 #define MSGID_PTHREAD_CREATE_FAIL                 "PTHREAD_CREATE_FAIL"      // Could not create SuspendThread
 #define MSGID_NYX_DEV_OPEN_FAIL                   "NYX_DEV_OPEN_FAIL"        // Unable to open the nyx device led controller
+#define MSGID_SUBSCRIBE_DISP_MGR_FAIL             "SUBSCRIBE_DISP_MGR_FAIL"  // Failed to subscribe for display manager updates
 
 /** suspend_ipc.c */
 #define MSGID_LS_SUBSCRIB_SETFUN_FAIL             "LS_SUBSCRIB_SETFUN_FAIL"  // Error in setting cancel function

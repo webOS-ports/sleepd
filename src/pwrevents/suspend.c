@@ -197,6 +197,8 @@ struct timespec sTimeOnWake;
 struct timespec sSuspendRTC;
 struct timespec sWakeRTC;
 
+bool gDisplayIsOn = true;
+
 void SuspendIPCInit(void);
 int SendSuspendRequest(const char *message);
 int SendPrepareSuspend(const char *message);
@@ -225,6 +227,25 @@ ScheduleIdleCheck(int interval_ms, bool fromPoll)
     {
         SLEEPDLOG_DEBUG("idle_scheduler not yet initialized");
     }
+}
+
+/**
+ * @brief Get display status using NYX interface.
+ */
+static bool
+IsDisplayOn(void)
+{
+	return gDisplayIsOn;
+}
+
+/**
+ * @brief Turn off display using NYX interface.
+ */
+void
+switchoffDisplay(void)
+{
+	LSCallOneReply(GetLunaServiceHandle(), "luna://com.palm.display/control/setState",
+		"{\"state\":\"off\"}", NULL, NULL, NULL, NULL);
 }
 
 /**
@@ -821,6 +842,50 @@ StateKernelResume(void)
     return _stateResume(kResumeTypeKernel);
 }
 
+static bool
+DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
+{
+    struct json_object *root_obj;
+    struct json_object *state_obj;
+    struct json_object *event_obj;
+    const char *state;
+    const char *event;
+
+    root_obj = json_tokener_parse(LSMessageGetPayload(message));
+    if (!root_obj) {
+        SLEEPDLOG_DEBUG("Failed to parse response from display manager");
+        return true;
+    }
+
+    /* NOTE: When we first call com.palm.display/control/status we will get a response
+     * which has the state field set. Afterwards we only get response with the event field
+     * set. */
+
+    state_obj = json_object_object_get(root_obj, "state");
+    if (state_obj) {
+        state = json_object_get_string(state_obj);
+
+        if (strncmp(state, "off", 3) == 0)
+            gDisplayIsOn = false;
+        else if (strncmp(state, "on", 2) == 0 || strncmp(state, "dimmed", 6) == 0)
+            gDisplayIsOn = true;
+    }
+
+    event_obj = json_object_object_get(root_obj, "event");
+    if (event_obj) {
+        event = json_object_get_string(event_obj);
+        if (strncmp(event, "displayOn", 9) == 0)
+            gDisplayIsOn = true;
+        else if (strncmp(event, "displayOff", 10) == 0 ||
+                 strncmp(event, "displayInactive", 15) == 0)
+            gDisplayIsOn = false;
+    }
+
+    json_object_put(root_obj);
+
+    return true;
+}
+
 /**
  * @brief We are in this state if the system did not really sleep but had to prevent the sleep because
  * an activity as active. It does so by broadcasting the "Resume" signal , schedule the next IdleCheck
@@ -860,6 +925,15 @@ SuspendInit(void)
     gCurrentStateNode = kStateMachine[kPowerStateOn];
     if(gSleepConfig.enable_idle_check_thread)
     {
+        /* FIXME Not sure this should be here inside the if. The if didn't exist in OWO */
+        LSError lserror;
+        LSErrorInit(&lserror);
+        if (!LSCall(GetLunaServiceHandle(), "luna://com.palm.display/control/status",
+                "{\"subscribe\":true}", DisplayStatusCb, NULL, NULL, &lserror))
+        {
+            SLEEPDLOG_WARNING(MSGID_SUBSCRIBE_DISP_MGR_FAIL, 0, "Failed to subscribe for display status updates");
+            LSErrorFree(&lserror);
+        }
         if (pthread_create(&suspend_tid, NULL, SuspendThread, NULL))
         {
             SLEEPDLOG_CRITICAL(MSGID_PTHREAD_CREATE_FAIL, 0,
