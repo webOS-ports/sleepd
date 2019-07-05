@@ -749,6 +749,16 @@ InstrumentOnWake(int resumeType)
     sawmill_logger_record_wake(diffAsleep);
 }
 
+static bool
+CheckActivitiesActive(struct timespec *now)
+{
+    if (MachineSupportsWakelocks())
+    {
+        return PwrEventActivityCheckActivitiesActive(now);
+    }
+
+    return PwrEventFreezeActivities(now);
+}
 
 /**
  * @brief In this state it will first send the "Suspended" signal to everybody. If any activity is active
@@ -789,7 +799,7 @@ StateSleep(void)
 
     // if any activities were started, abort suspend.
     if (gSuspendEvent != kPowerEventForceSuspend &&
-            !PwrEventFreezeActivities(&sTimeOnSuspended))
+            !CheckActivitiesActive(&sTimeOnSuspended))
     {
         SLEEPDLOG_DEBUG("aborting sleep because of current activity");
         PwrEventActivityPrintFrom(&sTimeOnSuspended);
@@ -837,7 +847,10 @@ static PowerState
 StateAbortSuspend(void)
 {
     PMLOG_TRACE("State Abort suspend");
-    PwrEventThawActivities();
+    if (!MachineSupportsWakelocks())
+    {
+        PwrEventThawActivities();
+    }
     SendResume(kResumeAbortSuspend, "resume (suspend aborted)");
 
     return kPowerStateOn;
@@ -857,7 +870,10 @@ _stateResume(int resumeType)
 
     MachineWakeup();
 
-    PwrEventThawActivities();
+    if (!MachineSupportsWakelocks())
+    {
+        PwrEventThawActivities();
+    }
 
     char *resumeDesc = g_strdup_printf("resume (%s)",
                                        resume_type_descriptions[resumeType]);
