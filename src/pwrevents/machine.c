@@ -45,6 +45,25 @@
  */
 bool chargerIsConnected = false;
 
+/**
+ * Holds the current state of whether or not the device supports Wakelocks.
+ */
+
+bool machineSupportsWakelocks = false;
+
+bool MachineSupportsWakelocks(void)
+{
+    static bool initialized = false;
+    if (!initialized)
+    {
+        machineSupportsWakelocks =  g_file_test("/sys/power/wake_lock", (GFileTest)(G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR));
+        SLEEPDLOG_DEBUG("System %s wakelocks", machineSupportsWakelocks ? "supports" : "does not support");
+        initialized = true;
+    }
+
+    return machineSupportsWakelocks;
+}
+
 bool
 MachineCanSleep(void)
 {
@@ -62,11 +81,25 @@ MachineCantSleepReason(void)
 }
 
 
-void MachineSleep(void)
+bool MachineSleep(void)
 {
-    bool success;
+    bool success = false;
+    nyx_error_t error = NYX_ERROR_NONE;
 
-    nyx_system_suspend(GetNyxSystemDevice(), &success);
+    error = nyx_system_suspend_async(GetNyxSystemDevice(), &success);
+    if (error != NYX_ERROR_NONE) {
+        SLEEPDLOG_DEBUG("NYX: failed to suspend (error %d)", error);
+        return false;
+    }
+
+    return success;
+}
+
+void MachineWakeup(void)
+{
+    bool success = false;
+
+    nyx_system_resume(GetNyxSystemDevice(), &success);
 }
 
 void

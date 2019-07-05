@@ -197,11 +197,40 @@ struct timespec sTimeOnWake;
 struct timespec sSuspendRTC;
 struct timespec sWakeRTC;
 
+bool gDisplayIsOn = true;
+
 void SuspendIPCInit(void);
 int SendSuspendRequest(const char *message);
 int SendPrepareSuspend(const char *message);
 int SendResume(int resumetype, char *message);
 int SendSuspended(const char *message);
+
+const char* StateToStr(PowerState state)
+{
+    switch (state)
+    {
+    case kPowerStateOn:
+        return "on";
+    case kPowerStateOnIdle:
+        return "on-idle";
+    case kPowerStateSuspendRequest:
+        return "suspend-request";
+    case kPowerStatePrepareSuspend:
+        return "prepare-suspend";
+    case kPowerStateSleep:
+        return "sleep";
+    case kPowerStateKernelResume:
+        return "kernel-resume";
+    case kPowerStateActivityResume:
+        return "activity-resume";
+    case kPowerStateAbortSuspend:
+        return "abort-suspend";
+    default:
+        return "unknown";
+    }
+
+     return NULL;
+}
 
 void
 StateLoopShutdown(void)
@@ -219,12 +248,22 @@ ScheduleIdleCheck(int interval_ms, bool fromPoll)
 {
     if (idle_scheduler)
     {
+        SLEEPDLOG_DEBUG("Scheduling new idle check in %d ms", interval_ms);
         g_timer_source_set_interval(idle_scheduler, interval_ms, fromPoll);
     }
     else
     {
         SLEEPDLOG_DEBUG("idle_scheduler not yet initialized");
     }
+}
+
+/**
+ * @brief Get display status using NYX interface.
+ */
+static bool
+IsDisplayOn(void)
+{
+    return gDisplayIsOn;
 }
 
 /**
@@ -241,94 +280,106 @@ IdleCheck(gpointer ctx)
     struct timespec now;
     int next_idle_ms = 0;
 
-    ClockGetTime(&now);
+    if (gCurrentStateNode.state == kPowerStateKernelResume) {
+        SLEEPDLOG_DEBUG("Not rescheduling idle check cause we're in sleep mode");
+        return TRUE;
+    }
 
-    /*
-     * Enforce that the minimum time awake must be at least
-     * after_resume_idle_ms.
-     */
-    struct timespec last_wake;
-    last_wake.tv_sec = sTimeOnWake.tv_sec;
-    last_wake.tv_nsec = sTimeOnWake.tv_nsec;
+    SLEEPDLOG_DEBUG("IdleCheck: state %s", StateToStr(gCurrentStateNode.state));
 
-    ClockAccumMs(&last_wake, gSleepConfig.after_resume_idle_ms);
-
-    if (!ClockTimeIsGreater(&last_wake, &now))
+    if (!IsDisplayOn())
     {
+        SLEEPDLOG_DEBUG("IdleCheck: display off");
+
+        ClockGetTime(&now);
+
         /*
-         * Do not sleep if any activity is still active
+         * Enforce that the minimum time awake must be at least
+         * after_resume_idle_ms.
          */
+        struct timespec last_wake;
+        last_wake.tv_sec = sTimeOnWake.tv_sec;
+        last_wake.tv_nsec = sTimeOnWake.tv_nsec;
 
-        activity_idle = PwrEventActivityCanSleep(&now);
+        ClockAccumMs(&last_wake, gSleepConfig.after_resume_idle_ms);
 
-        if (!activity_idle)
+        if (!ClockTimeIsGreater(&last_wake, &now))
         {
-            SLEEPDLOG_DEBUG("Can't sleep because an activity is active: ");
-        }
+            /*
+             * Do not sleep if any activity is still active
+             */
 
-        if (PwrEventActivityCount(&sTimeOnWake))
-        {
-            SLEEPDLOG_DEBUG("Activities since wake: ");
-            PwrEventActivityPrintFrom(&sTimeOnWake);
-        }
+            activity_idle = PwrEventActivityCanSleep(&now);
 
-        PwrEventActivityRemoveExpired(&now);
-        {
-            time_t expiry = 0;
-            gchar *app_id = NULL;
-            gchar *key = NULL;
-
-            if (timeout_get_next_wakeup(&expiry, &app_id, &key))
+            if (!activity_idle)
             {
-                g_free(app_id);
-                g_free(key);
-                int next_wake = expiry - reference_time();
+                SLEEPDLOG_DEBUG("Can't sleep because an activity is active: ");
+            }
 
-                if (next_wake >= 0 && next_wake <= gSleepConfig.wait_alarms_s)
+            if (PwrEventActivityCount(&sTimeOnWake))
+            {
+                SLEEPDLOG_DEBUG("Activities since wake: ");
+                PwrEventActivityPrintFrom(&sTimeOnWake);
+            }
+
+            PwrEventActivityRemoveExpired(&now);
+            {
+                time_t expiry = 0;
+                gchar *app_id = NULL;
+                gchar *key = NULL;
+
+                if (timeout_get_next_wakeup(&expiry, &app_id, &key))
                 {
-                    SLEEPDLOG_DEBUG("Not going to sleep because an alarm is about to fire in %d sec\n",
-                                    next_wake);
-                    goto resched;
+                    g_free(app_id);
+                    g_free(key);
+                    int next_wake = expiry - reference_time();
+
+                    if (next_wake >= 0 && next_wake <= gSleepConfig.wait_alarms_s)
+                    {
+                        SLEEPDLOG_DEBUG("Not going to sleep because an alarm is about to fire in %d sec\n",
+                                        next_wake);
+                        goto resched;
+                    }
                 }
             }
-        }
 
-        // temporary hack, to be removed once compositor starts registering with com.webos.service.power
+            // temporary hack, to be removed once compositor starts registering with com.webos.service.power
 #if 1
-        suspend_active = (access("/tmp/suspend_active", R_OK) == 0);
+            suspend_active = (access("/tmp/suspend_active", R_OK) == 0);
 
-        if (suspend_active && activity_idle)
-        {
-            TriggerSuspend("device is idle.", kPowerEventIdleEvent);
-        }
+            if (suspend_active && activity_idle)
+            {
+                TriggerSuspend("device is idle.", kPowerEventIdleEvent);
+            }
 
 #endif
-    }
-    else
-    {
-        struct timespec diff;
-        ClockDiff(&diff, &last_wake, &now);
-        next_idle_ms = ClockGetMs(&diff);
-    }
+        }
+        else
+        {
+            struct timespec diff;
+            ClockDiff(&diff, &last_wake, &now);
+            next_idle_ms = ClockGetMs(&diff);
+        }
 
 resched:
-    {
-        long wait_idle_ms = gSleepConfig.wait_idle_ms;
-        long max_duration_ms = PwrEventActivityGetMaxDuration(&now);
-
-        if (max_duration_ms > wait_idle_ms)
         {
-            wait_idle_ms = max_duration_ms;
-        }
+            long wait_idle_ms = gSleepConfig.wait_idle_ms;
+            long max_duration_ms = PwrEventActivityGetMaxDuration(&now);
 
-        if (next_idle_ms > wait_idle_ms)
-        {
-            wait_idle_ms = next_idle_ms;
-        }
+            if (max_duration_ms > wait_idle_ms)
+            {
+                wait_idle_ms = max_duration_ms;
+            }
 
-        ScheduleIdleCheck(wait_idle_ms, true);
+            if (next_idle_ms > wait_idle_ms)
+            {
+                wait_idle_ms = next_idle_ms;
+            }
+
+            ScheduleIdleCheck(wait_idle_ms, true);
+        }
+        return TRUE;
     }
-    return TRUE;
 }
 
 static gboolean
@@ -337,15 +388,24 @@ SuspendStateUpdate(PowerEvent power_event)
     gSuspendEvent = power_event;
     PowerState next_state = kPowerStateLast;
 
+    SLEEPDLOG_DEBUG("%s: state %s", __PRETTY_FUNCTION__, StateToStr(gCurrentStateNode.state));
+
     do
     {
+        SLEEPDLOG_DEBUG("In state '%s'", StateToStr(gCurrentStateNode.state));
         next_state = gCurrentStateNode.function();
+        SLEEPDLOG_DEBUG("Next state will be '%s'", StateToStr(next_state));
 
         if (next_state != kPowerStateLast)
         {
             gCurrentStateNode = kStateMachine[next_state];
+            /* When suspend cycle is done we're breaking the loop here and waiting for the
+            * upper stack to trigger the resume cycle */
+            if (next_state == kPowerStateKernelResume)
+            {
+                break;
+            }
         }
-
     }
     while (next_state != kPowerStateLast);
 
@@ -366,7 +426,6 @@ SuspendThread(void *ctx)
     context = g_main_context_new();
 
     suspend_loop = g_main_loop_new(context, FALSE);
-    g_main_context_unref(context);
 
     idle_scheduler = g_timer_source_new(
                          gSleepConfig.wait_idle_ms, gSleepConfig.wait_idle_granularity_ms);
@@ -375,10 +434,11 @@ SuspendThread(void *ctx)
                           IdleCheck, NULL, NULL);
     g_source_attach((GSource *)idle_scheduler,
                     g_main_loop_get_context(suspend_loop));
-    g_source_unref((GSource *)idle_scheduler);
 
     g_main_loop_run(suspend_loop);
+    g_source_unref((GSource *)idle_scheduler);
     g_main_loop_unref(suspend_loop);
+    g_main_context_unref(context);
 
     return NULL;
 }
@@ -689,6 +749,16 @@ InstrumentOnWake(int resumeType)
     sawmill_logger_record_wake(diffAsleep);
 }
 
+static bool
+CheckActivitiesActive(struct timespec *now)
+{
+    if (MachineSupportsWakelocks())
+    {
+        return PwrEventActivityCheckActivitiesActive(now);
+    }
+
+    return PwrEventFreezeActivities(now);
+}
 
 /**
  * @brief In this state it will first send the "Suspended" signal to everybody. If any activity is active
@@ -729,7 +799,7 @@ StateSleep(void)
 
     // if any activities were started, abort suspend.
     if (gSuspendEvent != kPowerEventForceSuspend &&
-            !PwrEventFreezeActivities(&sTimeOnSuspended))
+            !CheckActivitiesActive(&sTimeOnSuspended))
     {
         SLEEPDLOG_DEBUG("aborting sleep because of current activity");
         PwrEventActivityPrintFrom(&sTimeOnSuspended);
@@ -738,14 +808,16 @@ StateSleep(void)
 
     else
     {
+        SLEEPDLOG_DEBUG("Going to sleep now");
         if (MachineCanSleep())
         {
             if (queue_next_wakeup())
             {
+                SLEEPDLOG_DEBUG("We couldn't sleep because there can't setup wakup alarm");
                 // let the system sleep now.
-                MachineSleep();
+                nextState = kPowerStateAbortSuspend;
             }
-            else
+            else if (!MachineSleep())
             {
                 SLEEPDLOG_DEBUG("We couldn't sleep because there can't setup wakup alarm");
                 nextState = kPowerStateAbortSuspend;
@@ -761,6 +833,7 @@ StateSleep(void)
         PwrEventThawActivities();
     }
 
+    SLEEPDLOG_DEBUG("Leaving sleep state");
     return nextState;
 }
 
@@ -774,6 +847,10 @@ static PowerState
 StateAbortSuspend(void)
 {
     PMLOG_TRACE("State Abort suspend");
+    if (!MachineSupportsWakelocks())
+    {
+        PwrEventThawActivities();
+    }
     SendResume(kResumeAbortSuspend, "resume (suspend aborted)");
 
     return kPowerStateOn;
@@ -790,6 +867,13 @@ static PowerState
 _stateResume(int resumeType)
 {
     PMLOG_TRACE("We awoke");
+
+    MachineWakeup();
+
+    if (!MachineSupportsWakelocks())
+    {
+        PwrEventThawActivities();
+    }
 
     char *resumeDesc = g_strdup_printf("resume (%s)",
                                        resume_type_descriptions[resumeType]);
@@ -819,6 +903,51 @@ static PowerState
 StateKernelResume(void)
 {
     return _stateResume(kResumeTypeKernel);
+}
+
+static bool
+DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
+{
+    struct json_object *root_obj;
+    struct json_object *state_obj;
+    struct json_object *event_obj;
+    const char *state;
+    const char *event;
+
+    root_obj = json_tokener_parse(LSMessageGetPayload(message));
+    if (!root_obj) {
+        SLEEPDLOG_DEBUG("Failed to parse response from display manager");
+        return true;
+    }
+
+    /* NOTE: When we first call com.palm.display/control/status we will get a response
+     * which has the state field set. Afterwards we only get response with the event field
+     * set. */
+
+    state_obj = json_object_object_get(root_obj, "state");
+    if (state_obj) {
+        state = json_object_get_string(state_obj);
+
+        if (strncmp(state, "off", 3) == 0)
+            gDisplayIsOn = false;
+        else if (strncmp(state, "on", 2) == 0 || strncmp(state, "dimmed", 6) == 0)
+            gDisplayIsOn = true;
+    }
+
+    event_obj = json_object_object_get(root_obj, "event");
+    if (event_obj) {
+        event = json_object_get_string(event_obj);
+        if (strncmp(event, "displayOn", 9) == 0)
+            gDisplayIsOn = true;
+        else if (strncmp(event, "displayOff", 10) == 0)
+            gDisplayIsOn = false;
+    }
+
+    SLEEPDLOG_DEBUG("Display status is now %s", gDisplayIsOn ? "on" : "off");
+
+    json_object_put(root_obj);
+
+    return true;
 }
 
 /**
@@ -860,6 +989,15 @@ SuspendInit(void)
     gCurrentStateNode = kStateMachine[kPowerStateOn];
     if(gSleepConfig.enable_idle_check_thread)
     {
+        /* FIXME Not sure this should be here inside the if. The if didn't exist in OWO */
+        LSError lserror;
+        LSErrorInit(&lserror);
+        if (!LSCall(GetLunaServiceHandle(), "luna://com.palm.display/control/status",
+                "{\"subscribe\":true}", DisplayStatusCb, NULL, NULL, &lserror))
+        {
+            SLEEPDLOG_WARNING(MSGID_SUBSCRIBE_DISP_MGR_FAIL, 0, "Failed to subscribe for display status updates");
+            LSErrorFree(&lserror);
+        }
         if (pthread_create(&suspend_tid, NULL, SuspendThread, NULL))
         {
             SLEEPDLOG_CRITICAL(MSGID_PTHREAD_CREATE_FAIL, 0,
@@ -872,17 +1010,47 @@ SuspendInit(void)
 }
 
 /**
- * @brief Iterate through the state machine
+ * @brief Iterate through the suspend state machine
  */
 void
 TriggerSuspend(const char *reason, PowerEvent event)
 {
+    SLEEPDLOG_DEBUG("%s: state %s", __PRETTY_FUNCTION__, StateToStr(gCurrentStateNode.state));
+
+    GSource *source = g_idle_source_new();
+    g_source_set_callback(source,
+        (GSourceFunc)SuspendStateUpdate, GINT_TO_POINTER(event), NULL);
+    g_source_attach(source, g_main_loop_get_context(suspend_loop));
+
+    g_source_unref(source);
+}
+
+ /**
+ * @brief Iterate through the resume state machine
+ */
+void
+TriggerResume(const char *reason, PowerEvent event)
+{
+    SLEEPDLOG_DEBUG("%s: state %s", __PRETTY_FUNCTION__, StateToStr(gCurrentStateNode.state));
+
     GSource *source = g_idle_source_new();
     g_source_set_callback(source,
                           (GSourceFunc)SuspendStateUpdate, GINT_TO_POINTER(event), NULL);
     g_source_attach(source, g_main_loop_get_context(suspend_loop));
 
     g_source_unref(source);
+}
+
+/**
+ * @brief Check if the device is currently in a low power mode
+ *
+ * @return True, if device is currently suspended, False otherwise.
+ */
+bool
+IsSuspended(void)
+{
+    SLEEPDLOG_DEBUG("%s: state %s", __PRETTY_FUNCTION__, StateToStr(gCurrentStateNode.state));
+    return (gCurrentStateNode.state == kPowerStateKernelResume);
 }
 
 INIT_FUNC(INIT_FUNC_END, SuspendInit);

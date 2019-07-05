@@ -35,6 +35,8 @@ bool PwrEventActivityCanSleep(struct timespec *now);
 bool PwrEventFreezeActivities(struct timespec *now);
 void PwrEventThawActivities(void);
 
+bool PwrEventActivityCheckActivitiesActive(struct timespec *now);
+
 long PwrEventActivityGetMaxDuration(struct timespec *now);
 
 #endif

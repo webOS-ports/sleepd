@@ -25,7 +25,9 @@ bool MachineCanSleep(void);
 
 const char *MachineCantSleepReason(void);
 
-void MachineSleep(void);
+bool MachineSleep(void);
+
+void MachineWakeup(void);
 
 void MachineForceReboot(const char *reason);
 
@@ -36,5 +38,7 @@ void TurnBypassOn(void);
 void TurnBypassOff(void);
 
 int MachineGetToken(const char *token_name, char *buf, int len);
+
+bool MachineSupportsWakelocks(void);
 
 #endif // _MACHINE_H_

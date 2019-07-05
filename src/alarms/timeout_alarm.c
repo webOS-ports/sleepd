@@ -45,6 +45,7 @@
 #include "config.h"
 #include "init.h"
 #include "timesaver.h"
+#include "suspend.h"
 
 #define LOG_DOMAIN "ALARMS-TIMEOUT: "
 
@@ -164,7 +165,13 @@ static void _update_timeouts(void);
 static void _rtc_alarm_fired(nyx_device_handle_t handle,
                              nyx_callback_status_t status, void *data)
 {
+    SLEEPDLOG_DEBUG("RTC alarm fired");
+
+    TriggerResume("rtc", kPowerEventNone);
+
+#if 0
     _update_timeouts();
+#endif
 }
 
 

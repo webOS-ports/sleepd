@@ -353,6 +353,32 @@ forceSuspendCallback(LSHandle *sh, LSMessage *message, void *user_data)
 }
 
 /**
+ * @brief Resume the device when it is currently in a low power state.
+ *
+ * @param  sh
+ * @param  message
+ * @param  user_data
+ */
+
+bool
+resumeCalback(LSHandle *sh, LSMessage *message, void *user_data)
+{
+    PMLOG_TRACE("Received resume");
+
+    if (!IsSuspended()) {
+        LSMessageReplyErrorUnknown(sh, message);
+        return true;
+    }
+
+    /* FIXME get reason as argument from the caller */
+    TriggerResume(NULL, kPowerEventNone);
+
+    LSMessageReplySuccess(sh, message);
+
+    return true;
+}
+
+/**
  * @brief Schedule the IdleCheck thread to check if the device can suspend
  * (Used for testing purposes).
  *
@@ -805,6 +831,7 @@ LSMethod com_palm_suspend_methods[] =
     { "forceSuspend", forceSuspendCallback },
     { "identify", identifyCallback },
     { "clientCancelByName", clientCancelByName },
+    { "resume", resumeCalback },
 
     { "activityStart", activityStartCallback },
     { "activityEnd", activityEndCallback },
