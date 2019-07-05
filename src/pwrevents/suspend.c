@@ -248,6 +248,7 @@ ScheduleIdleCheck(int interval_ms, bool fromPoll)
 {
     if (idle_scheduler)
     {
+        SLEEPDLOG_DEBUG("Scheduling new ilde check in %d ms", interval_ms);
         g_timer_source_set_interval(idle_scheduler, interval_ms, fromPoll);
     }
     else
@@ -284,94 +285,101 @@ IdleCheck(gpointer ctx)
         return FALSE;
     }
 
-    ClockGetTime(&now);
+    SLEEPDLOG_DEBUG("IdleCheck: state %s", StateToStr(gCurrentStateNode.state));
 
-    /*
-     * Enforce that the minimum time awake must be at least
-     * after_resume_idle_ms.
-     */
-    struct timespec last_wake;
-    last_wake.tv_sec = sTimeOnWake.tv_sec;
-    last_wake.tv_nsec = sTimeOnWake.tv_nsec;
-
-    ClockAccumMs(&last_wake, gSleepConfig.after_resume_idle_ms);
-
-    if (!ClockTimeIsGreater(&last_wake, &now))
+    if (!IsDisplayOn())
     {
+        SLEEPDLOG_DEBUG("IdleCheck: display off");
+
+        ClockGetTime(&now);
+
         /*
-         * Do not sleep if any activity is still active
+         * Enforce that the minimum time awake must be at least
+         * after_resume_idle_ms.
          */
+        struct timespec last_wake;
+        last_wake.tv_sec = sTimeOnWake.tv_sec;
+        last_wake.tv_nsec = sTimeOnWake.tv_nsec;
 
-        activity_idle = PwrEventActivityCanSleep(&now);
+        ClockAccumMs(&last_wake, gSleepConfig.after_resume_idle_ms);
 
-        if (!activity_idle)
+        if (!ClockTimeIsGreater(&last_wake, &now))
         {
-            SLEEPDLOG_DEBUG("Can't sleep because an activity is active: ");
-        }
+            /*
+             * Do not sleep if any activity is still active
+             */
 
-        if (PwrEventActivityCount(&sTimeOnWake))
-        {
-            SLEEPDLOG_DEBUG("Activities since wake: ");
-            PwrEventActivityPrintFrom(&sTimeOnWake);
-        }
+            activity_idle = PwrEventActivityCanSleep(&now);
 
-        PwrEventActivityRemoveExpired(&now);
-        {
-            time_t expiry = 0;
-            gchar *app_id = NULL;
-            gchar *key = NULL;
-
-            if (timeout_get_next_wakeup(&expiry, &app_id, &key))
+            if (!activity_idle)
             {
-                g_free(app_id);
-                g_free(key);
-                int next_wake = expiry - reference_time();
+                SLEEPDLOG_DEBUG("Can't sleep because an activity is active: ");
+            }
 
-                if (next_wake >= 0 && next_wake <= gSleepConfig.wait_alarms_s)
+            if (PwrEventActivityCount(&sTimeOnWake))
+            {
+                SLEEPDLOG_DEBUG("Activities since wake: ");
+                PwrEventActivityPrintFrom(&sTimeOnWake);
+            }
+
+            PwrEventActivityRemoveExpired(&now);
+            {
+                time_t expiry = 0;
+                gchar *app_id = NULL;
+                gchar *key = NULL;
+
+                if (timeout_get_next_wakeup(&expiry, &app_id, &key))
                 {
-                    SLEEPDLOG_DEBUG("Not going to sleep because an alarm is about to fire in %d sec\n",
-                                    next_wake);
-                    goto resched;
+                    g_free(app_id);
+                    g_free(key);
+                    int next_wake = expiry - reference_time();
+
+                    if (next_wake >= 0 && next_wake <= gSleepConfig.wait_alarms_s)
+                    {
+                        SLEEPDLOG_DEBUG("Not going to sleep because an alarm is about to fire in %d sec\n",
+                                        next_wake);
+                        goto resched;
+                    }
                 }
             }
-        }
 
-        // temporary hack, to be removed once compositor starts registering with com.webos.service.power
+            // temporary hack, to be removed once compositor starts registering with com.webos.service.power
 #if 1
-        suspend_active = (access("/tmp/suspend_active", R_OK) == 0);
+            suspend_active = (access("/tmp/suspend_active", R_OK) == 0);
 
-        if (suspend_active && activity_idle)
-        {
-            TriggerSuspend("device is idle.", kPowerEventIdleEvent);
-        }
+            if (suspend_active && activity_idle)
+            {
+                TriggerSuspend("device is idle.", kPowerEventIdleEvent);
+            }
 
 #endif
-    }
-    else
-    {
-        struct timespec diff;
-        ClockDiff(&diff, &last_wake, &now);
-        next_idle_ms = ClockGetMs(&diff);
-    }
+        }
+        else
+        {
+            struct timespec diff;
+            ClockDiff(&diff, &last_wake, &now);
+            next_idle_ms = ClockGetMs(&diff);
+        }
 
 resched:
-    {
-        long wait_idle_ms = gSleepConfig.wait_idle_ms;
-        long max_duration_ms = PwrEventActivityGetMaxDuration(&now);
-
-        if (max_duration_ms > wait_idle_ms)
         {
-            wait_idle_ms = max_duration_ms;
-        }
+            long wait_idle_ms = gSleepConfig.wait_idle_ms;
+            long max_duration_ms = PwrEventActivityGetMaxDuration(&now);
 
-        if (next_idle_ms > wait_idle_ms)
-        {
-            wait_idle_ms = next_idle_ms;
-        }
+            if (max_duration_ms > wait_idle_ms)
+            {
+                wait_idle_ms = max_duration_ms;
+            }
 
-        ScheduleIdleCheck(wait_idle_ms, true);
+            if (next_idle_ms > wait_idle_ms)
+            {
+                wait_idle_ms = next_idle_ms;
+            }
+
+            ScheduleIdleCheck(wait_idle_ms, true);
+        }
+        return TRUE;
     }
-    return TRUE;
 }
 
 static gboolean
@@ -418,7 +426,6 @@ SuspendThread(void *ctx)
     context = g_main_context_new();
 
     suspend_loop = g_main_loop_new(context, FALSE);
-    g_main_context_unref(context);
 
     idle_scheduler = g_timer_source_new(
                          gSleepConfig.wait_idle_ms, gSleepConfig.wait_idle_granularity_ms);
@@ -427,10 +434,11 @@ SuspendThread(void *ctx)
                           IdleCheck, NULL, NULL);
     g_source_attach((GSource *)idle_scheduler,
                     g_main_loop_get_context(suspend_loop));
-    g_source_unref((GSource *)idle_scheduler);
 
     g_main_loop_run(suspend_loop);
+    g_source_unref((GSource *)idle_scheduler);
     g_main_loop_unref(suspend_loop);
+    g_main_context_unref(context);
 
     return NULL;
 }
@@ -1009,9 +1017,6 @@ void
 TriggerResume(const char *reason, PowerEvent event)
 {
     SLEEPDLOG_DEBUG("%s: state %s", __PRETTY_FUNCTION__, StateToStr(gCurrentStateNode.state));
-
-    // We woke up from sleep.
-    PwrEventThawActivities();
 
     GSource *source = g_idle_source_new();
     g_source_set_callback(source,
