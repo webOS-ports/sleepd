@@ -45,6 +45,25 @@
  */
 bool chargerIsConnected = false;
 
+/**
+ * Holds the current state of whether or not the device supports Wakelocks.
+ */
+
+bool machineSupportsWakelocks = false;
+
+bool MachineSupportsWakelocks(void)
+{
+    static bool initialized = false;
+    if (!initialized)
+    {
+        machineSupportsWakelocks =  g_file_test("/sys/power/wake_lock", (GFileTest)(G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR));
+        SLEEPDLOG_DEBUG("System %s wakelocks", machineSupportsWakelocks ? "supports" : "does not support");
+        initialized = true;
+    }
+
+    return machineSupportsWakelocks;
+}
+
 bool
 MachineCanSleep(void)
 {

@@ -35,10 +35,15 @@
 #include "logging.h"
 #include "activity.h"
 #include "init.h"
+#include "machine.h"
+#include "sysfs.h"
 
 //#include "metrics.h"
 
 //#define CONFIG_ACTIVITY_TIMEOUT_RDX_REPORT
+
+#define WAKELOCK_LOCK_PATH	"/sys/power/wake_lock"
+#define WAKELOCK_UNLOCK_PATH	"/sys/power/wake_unlock"
 
 // Max duration at 15 minutes.
 #define ACTIVITY_MAX_DURATION_MS (15*60*1000)
@@ -454,6 +459,53 @@ _activity_print(struct timespec *from, struct timespec *now)
     pthread_mutex_unlock(&activity_mutex);
 }
 
+static void
+_activity_wakelock_lock(const char *activity_id)
+{
+    if (!MachineSupportsWakelocks()) 
+    {
+        return;
+    }
+
+    char buff[255];
+    memset(buff, 0, 255);
+    snprintf(buff, 255, "activity-%s", activity_id);
+
+    if (SysfsWriteString(WAKELOCK_LOCK_PATH, buff) < 0) 
+    {
+        SLEEPDLOG_WARNING(MSGID_WAKE_LOCK_FAILED, 0, "Failed to lock system sleep state for activity %s",
+                          activity_id);
+    }
+    else
+    {
+        SLEEPDLOG_DEBUG("Successfully disabled wakelock %s", buff);
+    }
+}
+
+ static void
+_activity_wakelock_unlock(const char *activity_id)
+{
+    if (!MachineSupportsWakelocks())
+    {
+        return;
+    }
+
+    char buff[255];
+    memset(buff, 0, 255);
+    snprintf(buff, 255, "activity-%s", activity_id);
+
+    if (SysfsWriteString(WAKELOCK_UNLOCK_PATH, buff) < 0) 
+    {
+        SLEEPDLOG_WARNING(MSGID_WAKE_UNLOCK_FAILED, 0, "Failed to unlock system sleep state for activity %s",
+                          activity_id);
+    }
+    else
+    {
+        SLEEPDLOG_DEBUG("Successfully disabled wakelock %s", buff);
+    }
+}
+
+
 /**
  * @brief Free the memory for an activity.
  *
@@ -468,6 +520,7 @@ _activity_stop_activity(Activity *a)
         return;
     }
 
+    _activity_wakelock_unlock(a->activity_id);
     _activity_free(a);
 }
 
@@ -501,6 +554,8 @@ _activity_start(const char *activity_id, int duration_ms)
     /* replace exising *activity_id' */
     _activity_stop(activity_id);
 
+    _activity_wakelock_lock(activity_id);
+
     return _activity_insert(activity_id, duration_ms);
 }
 
@@ -510,12 +565,17 @@ _activity_start(const char *activity_id, int duration_ms)
 * @param  activity_id  Should be in format com.domain.reverse-serial.
 * @param  duration_ms
 *
-* @return false if the activity could not be created... (activities may be frozen).
+* @return false if the activity could not be created.
 */
 bool
 PwrEventActivityStart(const char *activity_id, int duration_ms)
 {
     bool retVal;
+
+    if (MachineSupportsWakelocks()) 
+    {
+        TriggerResume("activity", kPowerEventNone);
+    }
 
     retVal = _activity_start(activity_id, duration_ms);
 
@@ -675,6 +735,17 @@ PwrEventActivityGetMaxDuration(struct timespec *now)
     ClockDiff(&diff, &a->end_time, now);
 
     return ClockGetMs(&diff);
+}
+
+bool
+PwrEventActivityCheckActivitiesActive(struct timespec *now)
+{
+    if (_activity_obtain_min_unlocked(now) != NULL)
+    {
+        return false;
+    }
+
+    return true;
 }
 
 /*

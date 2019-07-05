@@ -105,6 +105,8 @@
 /** machine.c */
 #define MSGID_FRC_SHUTDOWN                        "FRC_SHUTDOWN"             // Force Shutdown
 #define MSGID_FRC_REBOOT                          "FRC_REBOOT"               // Force Reboot
+#define MSGID_WAKE_LOCK_FAILED                    "WAKE_LOCK_FAILED"         // Wake lock failed
+#define MSGID_WAKE_UNLOCK_FAILED                  "WAKE_UNLOCK_FAILED"       // Wake unlock failed
 
 /** shutdown.c */
 #define MSGID_SHUTDOWN_APPS_SIG_FAIL              "SHUTDOWN_APPS_SIG_FAIL"   // Could not send shutdown applications
