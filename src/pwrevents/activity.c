@@ -687,7 +687,9 @@ bool
 PwrEventFreezeActivities(struct timespec *now)
 {
     bool result = true;
+#if 0
     pthread_mutex_lock(&activity_mutex);
+#endif
 
     if (_activity_obtain_min_unlocked(now) != NULL)
     {
@@ -697,7 +699,9 @@ PwrEventFreezeActivities(struct timespec *now)
     {
         gFrozen = true;
     }
+#if 0
     pthread_mutex_unlock(&activity_mutex);
+#endif
 
     return result;
 }
@@ -710,7 +714,9 @@ void
 PwrEventThawActivities(void)
 {
     gFrozen = false;
+#if 0
     pthread_mutex_unlock(&activity_mutex);
+#endif
 }
 
 INIT_FUNC(INIT_FUNC_EARLY, _activity_init);
