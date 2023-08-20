@@ -3,6 +3,7 @@
         "activity.query",
         "activity.operation",
         "activity.wakeup",
+        "powerd.management",
         "sleep.operation",
         "sleep.management"
     ],
@@ -10,6 +11,7 @@
         "activity.query",
         "activity.operation",
         "activity.wakeup",
+        "powerd.management",
         "sleep.operation",
         "sleep.management"
     ],
@@ -17,6 +19,7 @@
         "activity.query",
         "activity.operation",
         "activity.wakeup",
+        "powerd.management",
         "sleep.operation",
         "sleep.management"
     ]
