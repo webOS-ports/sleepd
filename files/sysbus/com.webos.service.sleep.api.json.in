@@ -2,6 +2,7 @@
 "sleep.operation": [
 "com.palm.sleep/com/palm/power/activityEnd",
 "com.palm.sleep/com/palm/power/activityStart",
+"com.webos.service.power/suspend/activityStart",
 "com.palm.sleep/com/palm/power/clientCancelByName",
 "com.palm.sleep/com/palm/power/forceSuspend",
 "com.palm.sleep/com/palm/power/identify",
@@ -21,6 +22,7 @@
 "sleep.management": [
 "com.palm.sleep/com/palm/power/activityEnd",
 "com.palm.sleep/com/palm/power/activityStart",
+"com.webos.service.power/suspend/activityStart",
 "com.palm.sleep/com/palm/power/clientCancelByName",
 "com.palm.sleep/com/palm/power/forceSuspend",
 "com.palm.sleep/com/palm/power/identify",
