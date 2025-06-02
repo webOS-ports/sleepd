@@ -1210,26 +1210,26 @@ cleanup:
 
 LSMethod shutdown_methods[] =
 {
-    { "initiate", initiateShutdown,LUNA_METHOD_FLAG_DEPRECATED },
+    { "initiate", initiateShutdown },
 
-    { "shutdownApplicationsRegister", shutdownApplicationsRegister,LUNA_METHOD_FLAG_DEPRECATED },
-    { "shutdownApplicationsAck", shutdownApplicationsAck,LUNA_METHOD_FLAG_DEPRECATED },
+    { "shutdownApplicationsRegister", shutdownApplicationsRegister },
+    { "shutdownApplicationsAck", shutdownApplicationsAck },
 
-    { "shutdownServicesRegister", shutdownServicesRegister,LUNA_METHOD_FLAG_DEPRECATED },
-    { "shutdownServicesAck", shutdownServicesAck,LUNA_METHOD_FLAG_DEPRECATED },
+    { "shutdownServicesRegister", shutdownServicesRegister },
+    { "shutdownServicesAck", shutdownServicesAck },
 
-    { "TESTresetShutdownState", TESTresetShutdownState,LUNA_METHOD_FLAG_DEPRECATED },
+    { "TESTresetShutdownState", TESTresetShutdownState },
 
-    { "machineOff", machineOff,LUNA_METHOD_FLAG_DEPRECATED },
-    { "machineReboot", machineReboot,LUNA_METHOD_FLAG_DEPRECATED },
+    { "machineOff", machineOff },
+    { "machineReboot", machineReboot },
 
     { },
 };
 
 LSSignal shutdown_signals[] =
 {
-    { "shutdownApplications",LUNA_METHOD_FLAG_DEPRECATED },
-    { "shutdownServices",LUNA_METHOD_FLAG_DEPRECATED },
+    { "shutdownApplications" },
+    { "shutdownServices" },
     { },
 };
 
