@@ -24,6 +24,7 @@
 
 #include <syslog.h>
 #include <string.h>
+#include <glib.h>
 #include <json.h>
 #include <luna-service2/lunaservice.h>
 
@@ -39,6 +40,8 @@
 #include "lunaservice_utils.h"
 #include "sleepd_config.h"
 #include "json_utils.h"
+#include "machine.h"
+#include "sysfs.h"
 
 #define LOG_DOMAIN "PWREVENT-SUSPEND: "
 
@@ -108,12 +111,250 @@ out:
  * @param  ctx
  */
 
+static void wakelock_client_cancel_by_token(const char *token);
+
 bool
 clientCancel(LSHandle *sh, LSMessage *msg, void *ctx)
 {
     const char *clientId = LSMessageGetUniqueToken(msg);
     PwrEventClientUnregister(clientId);
     shutdown_client_cancel_registration(clientId);
+    wakelock_client_cancel_by_token(clientId);
+    return true;
+}
+
+/**
+ * Legacy powerd wake lock API.
+ *
+ * Open webOS clients - luna-downloadmgr is the one that ships today - hold
+ * the system awake around work like an active download with the powerd-era
+ * pair
+ *
+ *     wakeLockRegister {"register": true, "clientId": "<id>"}
+ *     setWakeLock      {"clientId": "<id>", "isWakeup": true|false}
+ *
+ * on /com/palm/power. The methods vanished in the migration to the OSE
+ * sleepd (its api.json still listed them until 2024, when they were removed
+ * as "unused"), so every call failed with LS_NO_METH and the client silently
+ * lost its ability to veto suspend. Back them with kernel wakelocks, the
+ * same mechanism the activity timeouts use: while a named lock is held the
+ * kernel refuses to autosleep, so the suspend state machine can run its
+ * course and the veto still works.
+ *
+ * A registration is also tracked as a subscription so that clientCancel()
+ * fires when the caller drops off the bus - a crashed client must not leak
+ * its wakelock until reboot.
+ */
+
+typedef struct
+{
+    char *clientId;   /**< the id the client chose; setWakeLock passes it back */
+    char *token;      /**< unique token of the registering message */
+    bool  held;       /**< whether the kernel wakelock is currently taken */
+} WakeLockClient;
+
+static GHashTable *sWakeLockClients = NULL;
+
+#define CLIENT_WAKELOCK_LOCK_PATH    "/sys/power/wake_lock"
+#define CLIENT_WAKELOCK_UNLOCK_PATH  "/sys/power/wake_unlock"
+
+static void
+wakelock_client_sysfs(const char *path, const char *clientId)
+{
+    char buff[255];
+
+    if (!MachineSupportsWakelocks())
+    {
+        return;
+    }
+
+    snprintf(buff, sizeof(buff), "webos-%s", clientId);
+
+    if (SysfsWriteString(path, buff) < 0)
+    {
+        SLEEPDLOG_WARNING(MSGID_WAKE_LOCK_FAILED, 0,
+                          "Failed to write client wakelock %s to %s", buff, path);
+    }
+}
+
+static void
+wakelock_client_free(gpointer data)
+{
+    WakeLockClient *c = (WakeLockClient *)data;
+
+    if (c->held)
+    {
+        wakelock_client_sysfs(CLIENT_WAKELOCK_UNLOCK_PATH, c->clientId);
+    }
+
+    g_free(c->clientId);
+    g_free(c->token);
+    g_free(c);
+}
+
+static void
+wakelock_client_cancel_by_token(const char *token)
+{
+    GHashTableIter iter;
+    gpointer key, value;
+
+    if (!sWakeLockClients || !token)
+    {
+        return;
+    }
+
+    g_hash_table_iter_init(&iter, sWakeLockClients);
+
+    while (g_hash_table_iter_next(&iter, &key, &value))
+    {
+        WakeLockClient *c = (WakeLockClient *)value;
+
+        if (c->token && !strcmp(c->token, token))
+        {
+            g_hash_table_iter_remove(&iter);
+        }
+    }
+}
+
+/**
+ * @brief Register or unregister a wake lock client (legacy powerd API).
+ */
+
+bool
+wakeLockRegisterCallback(LSHandle *sh, LSMessage *message, void *user_data)
+{
+    struct json_object *object = json_tokener_parse(LSMessageGetPayload(message));
+    const char *clientId = NULL;
+    bool reg = false;
+
+    if (!object)
+    {
+        goto malformed_json;
+    }
+
+    if (!get_json_boolean(object, "register", &reg))
+    {
+        goto malformed_json;
+    }
+
+    if (!get_json_string(object, "clientId", &clientId) || !clientId[0])
+    {
+        goto malformed_json;
+    }
+
+    if (!sWakeLockClients)
+    {
+        sWakeLockClients = g_hash_table_new_full(g_str_hash, g_str_equal,
+                           g_free, wakelock_client_free);
+    }
+
+    if (reg)
+    {
+        LSError lserror;
+        LSErrorInit(&lserror);
+
+        WakeLockClient *c = g_new0(WakeLockClient, 1);
+        c->clientId = g_strdup(clientId);
+        c->token = g_strdup(LSMessageGetUniqueToken(message));
+        g_hash_table_replace(sWakeLockClients, g_strdup(clientId), c);
+
+        /* Not a real subscription, but adding the message to one makes
+         * clientCancel() fire when the caller disconnects, which is the
+         * only way to reclaim the wakelock of a crashed client. */
+        if (!LSSubscriptionAdd(sh, "WakeLockClients", message, &lserror))
+        {
+            LSErrorFree(&lserror);
+        }
+
+        SLEEPDLOG_DEBUG("wakeLockRegister: registered client %s", clientId);
+    }
+    else
+    {
+        g_hash_table_remove(sWakeLockClients, clientId);
+        SLEEPDLOG_DEBUG("wakeLockRegister: unregistered client %s", clientId);
+    }
+
+    LSMessageReplySuccess(sh, message);
+    goto cleanup;
+
+malformed_json:
+    LSMessageReplyErrorBadJSON(sh, message);
+
+cleanup:
+
+    if (object)
+    {
+        json_object_put(object);
+    }
+
+    return true;
+}
+
+/**
+ * @brief Take or drop the kernel wakelock of a registered client
+ *        (legacy powerd API).
+ */
+
+bool
+setWakeLockCallback(LSHandle *sh, LSMessage *message, void *user_data)
+{
+    struct json_object *object = json_tokener_parse(LSMessageGetPayload(message));
+    const char *clientId = NULL;
+    bool isWakeup = false;
+    WakeLockClient *c = NULL;
+
+    if (!object)
+    {
+        goto malformed_json;
+    }
+
+    if (!get_json_string(object, "clientId", &clientId))
+    {
+        goto malformed_json;
+    }
+
+    if (!get_json_boolean(object, "isWakeup", &isWakeup))
+    {
+        goto malformed_json;
+    }
+
+    if (sWakeLockClients)
+    {
+        c = g_hash_table_lookup(sWakeLockClients, clientId);
+    }
+
+    if (!c)
+    {
+        LSMessageReplyCustomError(sh, message, "Client not registered");
+        goto cleanup;
+    }
+
+    if (isWakeup && !c->held)
+    {
+        wakelock_client_sysfs(CLIENT_WAKELOCK_LOCK_PATH, c->clientId);
+        c->held = true;
+    }
+    else if (!isWakeup && c->held)
+    {
+        wakelock_client_sysfs(CLIENT_WAKELOCK_UNLOCK_PATH, c->clientId);
+        c->held = false;
+    }
+
+    SLEEPDLOG_DEBUG("setWakeLock: client %s isWakeup %d", clientId, isWakeup);
+
+    LSMessageReplySuccess(sh, message);
+    goto cleanup;
+
+malformed_json:
+    LSMessageReplyErrorBadJSON(sh, message);
+
+cleanup:
+
+    if (object)
+    {
+        json_object_put(object);
+    }
+
     return true;
 }
 
@@ -843,6 +1084,10 @@ LSMethod com_palm_suspend_methods[] =
 
     { "activityStart", activityStartCallback },
     { "activityEnd", activityEndCallback },
+
+    /* legacy powerd wake lock API, still used by Open webOS clients */
+    { "wakeLockRegister", wakeLockRegisterCallback },
+    { "setWakeLock", setWakeLockCallback },
 
     { "TESTSuspend", TESTSuspendCallback },
 
