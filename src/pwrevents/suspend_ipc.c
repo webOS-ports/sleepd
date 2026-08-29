@@ -893,6 +893,10 @@ error:
     return -1;
 }
 
-INIT_FUNC(INIT_FUNC_END, com_palm_suspend_lunabus_init);
+/* com_palm_suspend_lunabus_init() is called from SuspendInit(), which needs
+ * the categories in place before it spawns the suspend thread. It must not
+ * also be registered as an INIT_FUNC: both ran at INIT_FUNC_END, so the
+ * second invocation tried to register /com/palm/power again and failed with
+ * "Category /com/palm/power already registered" on every start. */
 
 /* @} END OF SuspendIPC */
