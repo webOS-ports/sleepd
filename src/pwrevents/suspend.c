@@ -227,8 +227,6 @@ const char* StateToStr(PowerState state)
     default:
         return "unknown";
     }
-
-     return NULL;
 }
 
 void
@@ -813,13 +811,12 @@ StateSleep(void)
         {
             if (queue_next_wakeup())
             {
-                SLEEPDLOG_DEBUG("We couldn't sleep because there can't setup wakup alarm");
-                // let the system sleep now.
+                SLEEPDLOG_DEBUG("We couldn't sleep because we can't setup the wakeup alarm");
                 nextState = kPowerStateAbortSuspend;
             }
             else if (!MachineSleep())
             {
-                SLEEPDLOG_DEBUG("We couldn't sleep because there can't setup wakup alarm");
+                SLEEPDLOG_DEBUG("We couldn't sleep because the suspend request failed");
                 nextState = kPowerStateAbortSuspend;
             }
         }
@@ -928,6 +925,9 @@ DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
     if (state_obj) {
         state = json_object_get_string(state_obj);
 
+        if (!state)
+            state = "";
+
         if (strncmp(state, "off", 3) == 0)
             gDisplayIsOn = false;
         else if (strncmp(state, "on", 2) == 0 || strncmp(state, "dimmed", 6) == 0)
@@ -937,6 +937,10 @@ DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
     event_obj = json_object_object_get(root_obj, "event");
     if (event_obj) {
         event = json_object_get_string(event_obj);
+
+        if (!event)
+            event = "";
+
         if (strncmp(event, "displayOn", 9) == 0)
             gDisplayIsOn = true;
         else if (strncmp(event, "displayOff", 10) == 0)
