@@ -52,7 +52,7 @@ _check_integrity(sqlite3 *db)
 
     rc = sqlite3_prepare_v2(db, cmd, -1, &stmt, &tail);
 
-    if (stmt)
+    if (rc == SQLITE_OK && stmt)
     {
         rc = sqlite3_step(stmt);
 

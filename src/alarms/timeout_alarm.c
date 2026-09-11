@@ -432,7 +432,7 @@ _expire_timeouts(void)
 
         if (rc == SQLITE_OK)
         {
-            rc = sqlite3_bind_int(st, 1, atoi(timeout.table_id));
+            sqlite3_bind_int(st, 1, atoi(timeout.table_id));
             _sql_step_finalize(__func__, st);
         }
         else
