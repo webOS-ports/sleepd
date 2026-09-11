@@ -86,12 +86,11 @@ enum
     kResumeAbortSuspend
 };
 
-static char *resume_type_descriptions[] =
+static const char *resume_type_descriptions[] =
 {
-    "kernel",
-    "pwrevent_activity",
-    "pwrevent_non_idle",
-    "abort_suspend",
+    [kResumeTypeKernel]   = "kernel",
+    [kResumeTypeActivity] = "pwrevent_activity",
+    [kResumeAbortSuspend] = "abort_suspend",
 };
 
 // A PowerStateProc processes the current state and returns the next state
