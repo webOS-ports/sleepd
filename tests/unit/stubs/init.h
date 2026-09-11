@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Herman van Hazendonk <github.com@herrie.org>
+//
+// SPDX-License-Identifier: Apache-2.0
 /* Test stub for init.h: the INIT_FUNC constructor registration is a no-op
  * so units can be compiled standalone. */
 #ifndef _TEST_STUB_INIT_H_

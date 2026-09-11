@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright (c) 2026 Herman van Hazendonk <github.com@herrie.org>
+#
+# SPDX-License-Identifier: Apache-2.0
 # check-binary.sh <sleepd-binary> [readelf] [nm]
 #
 # Verifies the exploit-mitigation posture of a built sleepd binary:

@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright (c) 2026 Herman van Hazendonk <github.com@herrie.org>
+#
+# SPDX-License-Identifier: Apache-2.0
 # run-all.sh [sleepd-binary] [adb-serial]
 #
 # Runs every host-side layer of the harness; optionally also audits a built

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Herman van Hazendonk <github.com@herrie.org>
+//
+// SPDX-License-Identifier: Apache-2.0
 /* Test stub for include/internal/logging.h: log to stderr, no PmLogLib. */
 #ifndef _TEST_STUB_LOGGING_H_
 #define _TEST_STUB_LOGGING_H_

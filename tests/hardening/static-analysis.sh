@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright (c) 2026 Herman van Hazendonk <github.com@herrie.org>
+#
+# SPDX-License-Identifier: Apache-2.0
 # static-analysis.sh [srcdir]
 #
 # Static-analysis gate for sleepd. Fails on any cppcheck error/warning

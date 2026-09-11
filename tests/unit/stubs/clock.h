@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Herman van Hazendonk <github.com@herrie.org>
+//
+// SPDX-License-Identifier: Apache-2.0
 /* Test stub for clock.h: the real implementations live in libluna-service2,
  * which is not available on the build host. Semantics mirror LS2's clock.c. */
 #ifndef _TEST_STUB_CLOCK_H_

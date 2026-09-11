@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright (c) 2026 Herman van Hazendonk <github.com@herrie.org>
+#
+# SPDX-License-Identifier: Apache-2.0
 # sleepd-smoke.sh - on-device functional test suite for sleepd (LuneOS).
 #
 # Runs against the live daemon over the luna bus; busybox-sh compatible.

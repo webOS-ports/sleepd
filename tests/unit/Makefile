@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Herman van Hazendonk <github.com@herrie.org>
+#
+# SPDX-License-Identifier: Apache-2.0
 # Host-side unit tests for sleepd.
 #
 # These compile the units under test straight out of src/ against small stub
