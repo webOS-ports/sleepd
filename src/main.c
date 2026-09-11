@@ -219,9 +219,9 @@ main(int argc, char **argv)
     if (retVal)
     {
         retVal = LSGmainAttach(webos_sh, mainloop, &lserror);
-
     }
-    else
+
+    if (!retVal)
     {
         SLEEPDLOG_CRITICAL(MSGID_SRVC_REGISTER_FAIL, 1, PMLOGKS(ERRTEXT,
                            lserror.message), "Could not initialize com.webos.service.power");
@@ -237,9 +237,9 @@ main(int argc, char **argv)
     if (retVal)
     {
         retVal = LSGmainAttach(lsh, mainloop, &lserror);
-
     }
-    else
+
+    if (!retVal)
     {
         SLEEPDLOG_CRITICAL(MSGID_SRVC_REGISTER_FAIL, 1, PMLOGKS(ERRTEXT,
                            lserror.message), "Could not initialize com.palm.sleep");
