@@ -878,6 +878,14 @@ _timeout_clear(const char *app_id, const char *key, bool public_bus)
 
     if (retVal)
     {
+        /* the DELETE executing is not the same as it matching anything:
+         * report "not found" when no row was removed, so the handler's
+         * "Could not find key." error path can actually trigger. */
+        retVal = sqlite3_changes(timeout_db) > 0;
+    }
+
+    if (retVal)
+    {
         _update_timeouts();
     }
 

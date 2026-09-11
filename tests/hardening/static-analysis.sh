@@ -30,6 +30,7 @@ fi
 if command -v clang-tidy >/dev/null 2>&1 && [ -n "${SLEEPD_COMPILE_DB:-}" ]; then
     echo "== clang-tidy"
     OUT=$(clang-tidy -p "$SLEEPD_COMPILE_DB" --quiet \
+            --extra-arg=-Wno-unused-command-line-argument \
             --checks='clang-analyzer-*,bugprone-*,concurrency-*,-bugprone-easily-swappable-parameters,-bugprone-narrowing-conversions,-bugprone-reserved-identifier,-bugprone-assignment-in-if-condition,-bugprone-unsafe-functions,-bugprone-implicit-widening-of-multiplication-result' \
             "$SRC"/src/*.c "$SRC"/src/*/*.c 2>/dev/null | grep "warning:") || true
     if [ -n "$OUT" ]; then
