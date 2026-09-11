@@ -70,7 +70,7 @@ do {                                                            \
     GError *gerror = NULL;                                      \
     intVal = g_key_file_get_integer(keyfile,cat,name,&gerror);  \
     if (!gerror) {                                              \
-        var = intVal;                                           \
+        (var) = intVal;                                           \
         SLEEPDLOG_DEBUG(#var " = %d", intVal);                          \
     }                                                           \
     else { g_error_free(gerror); }                              \
@@ -82,7 +82,7 @@ do {                                                            \
     GError *gerror = NULL;                                      \
     boolVal = g_key_file_get_boolean(keyfile,cat,name,&gerror); \
     if (!gerror) {                                              \
-        var = boolVal;                                          \
+        (var) = boolVal;                                          \
         SLEEPDLOG_DEBUG(#var " = %s",                                   \
                   boolVal ? "true" : "false");                  \
     }                                                           \
@@ -133,8 +133,16 @@ config_init(void)
                        gSleepConfig.wait_suspend_response_ms);
         CONFIG_GET_INT(config_file, "suspend", "wait_prepare_suspend_ms",
                        gSleepConfig.wait_prepare_suspend_ms);
-        CONFIG_GET_BOOL(config_file, "suspend", "wait_alarms_ms",
-                        gSleepConfig.wait_alarms_s);
+        {
+            /* The conf key carries milliseconds but the setting is kept in
+             * seconds; it was also read with CONFIG_GET_BOOL, so a value
+             * like "5000" never parsed and the compiled-in default always
+             * won. Parse it as an integer and convert. */
+            int wait_alarms_ms = gSleepConfig.wait_alarms_s * 1000;
+            CONFIG_GET_INT(config_file, "suspend", "wait_alarms_ms",
+                           wait_alarms_ms);
+            gSleepConfig.wait_alarms_s = wait_alarms_ms / 1000;
+        }
 
         CONFIG_GET_BOOL(config_file, "suspend", "suspend_with_charger",
                         gSleepConfig.suspend_with_charger);
