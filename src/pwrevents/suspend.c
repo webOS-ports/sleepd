@@ -378,8 +378,9 @@ resched:
 
             ScheduleIdleCheck(wait_idle_ms, true);
         }
-        return TRUE;
     }
+
+    return TRUE;
 }
 
 static gboolean
