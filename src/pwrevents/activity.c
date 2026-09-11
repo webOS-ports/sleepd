@@ -395,29 +395,6 @@ _activity_obtain_min(struct timespec *now)
 }
 
 /**
- * @brief Get the last activity expiring by locking activity_mutex.
- *
- * @param now
- *
- * @retval Activity
- */
-
-
-static Activity *
-_activity_obtain_max(struct timespec *now)
-{
-    Activity *max_activity = NULL;
-
-    pthread_mutex_lock(&activity_mutex);
-
-    max_activity = _activity_obtain_max_unlocked(now);
-
-    pthread_mutex_unlock(&activity_mutex);
-
-    return max_activity;
-}
-
-/**
  * @brief Print the details of all the activities starting from a specified time
  *
  * @param from Activities starting from this time stamp
