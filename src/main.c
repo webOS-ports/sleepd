@@ -276,7 +276,10 @@ main(int argc, char **argv)
 
     g_main_loop_run(mainloop);
 
-error:
     g_main_loop_unref(mainloop);
     return 0;
+
+error:
+    g_main_loop_unref(mainloop);
+    return 1;
 }

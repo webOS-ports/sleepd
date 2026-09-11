@@ -785,18 +785,15 @@ state_shutdown_services_process(ShutdownEvent *event, ShutdownState *next)
 static bool
 state_shutdown_action(ShutdownEvent *event, ShutdownState *next)
 {
-    bool retVal =
-        LSMessageReply(shutdown_sh, shutdown_message,
-                       "{\"success\":true}", NULL);
-
-    if (!retVal)
-    {
-        SLEEPDLOG_WARNING(MSGID_SHUTDOWN_REPLY_FAIL, 0,
-                          "Could not send shutdown success message");
-    }
-
     if (shutdown_message)
     {
+        if (!LSMessageReply(shutdown_sh, shutdown_message,
+                            "{\"success\":true}", NULL))
+        {
+            SLEEPDLOG_WARNING(MSGID_SHUTDOWN_REPLY_FAIL, 0,
+                              "Could not send shutdown success message");
+        }
+
         LSMessageUnref(shutdown_message);
         shutdown_message = NULL;
     }
@@ -853,6 +850,14 @@ initiateShutdown(LSHandle *sh, LSMessage *message, void *user_data)
     event.client = NULL;
 
     LSMessageRef(message);
+
+    if (shutdown_message)
+    {
+        /* a second initiate while one is in flight would leak the
+         * previously referenced message */
+        LSMessageUnref(shutdown_message);
+    }
+
     shutdown_message = message;
     shutdown_sh = sh;
 
