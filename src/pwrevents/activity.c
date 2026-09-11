@@ -554,9 +554,17 @@ _activity_start(const char *activity_id, int duration_ms)
     /* replace exising *activity_id' */
     _activity_stop(activity_id);
 
+    if (!_activity_insert(activity_id, duration_ms))
+    {
+        /* activities are frozen: taking the kernel wakelock anyway would
+         * leak it with no roster entry left to ever release it, pinning
+         * the device awake until reboot. */
+        return false;
+    }
+
     _activity_wakelock_lock(activity_id);
 
-    return _activity_insert(activity_id, duration_ms);
+    return true;
 }
 
 /**
@@ -723,29 +731,32 @@ PwrEventActivityCanSleep(struct timespec *now)
 long
 PwrEventActivityGetMaxDuration(struct timespec *now)
 {
-    Activity *a = _activity_obtain_max(now);
+    long duration_ms = 0;
 
-    if (!a)
+    /* Read end_time while still holding the mutex: the LS thread can stop
+     * and free the activity the moment the lock is dropped, so the pointer
+     * returned by the locked lookup helpers must not be dereferenced after
+     * they unlock. */
+    pthread_mutex_lock(&activity_mutex);
+
+    Activity *a = _activity_obtain_max_unlocked(now);
+
+    if (a)
     {
-        return 0;
+        struct timespec diff;
+        ClockDiff(&diff, &a->end_time, now);
+        duration_ms = ClockGetMs(&diff);
     }
 
-    struct timespec diff;
+    pthread_mutex_unlock(&activity_mutex);
 
-    ClockDiff(&diff, &a->end_time, now);
-
-    return ClockGetMs(&diff);
+    return duration_ms;
 }
 
 bool
 PwrEventActivityCheckActivitiesActive(struct timespec *now)
 {
-    if (_activity_obtain_min_unlocked(now) != NULL)
-    {
-        return false;
-    }
-
-    return true;
+    return _activity_obtain_min(now) == NULL;
 }
 
 /*
@@ -758,9 +769,8 @@ bool
 PwrEventFreezeActivities(struct timespec *now)
 {
     bool result = true;
-#if 0
+
     pthread_mutex_lock(&activity_mutex);
-#endif
 
     if (_activity_obtain_min_unlocked(now) != NULL)
     {
@@ -770,9 +780,8 @@ PwrEventFreezeActivities(struct timespec *now)
     {
         gFrozen = true;
     }
-#if 0
+
     pthread_mutex_unlock(&activity_mutex);
-#endif
 
     return result;
 }
@@ -784,10 +793,9 @@ PwrEventFreezeActivities(struct timespec *now)
 void
 PwrEventThawActivities(void)
 {
+    pthread_mutex_lock(&activity_mutex);
     gFrozen = false;
-#if 0
     pthread_mutex_unlock(&activity_mutex);
-#endif
 }
 
 INIT_FUNC(INIT_FUNC_EARLY, _activity_init);
