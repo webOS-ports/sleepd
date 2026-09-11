@@ -776,15 +776,18 @@ _timeout_read(_AlarmTimeoutNonConst *timeout, const char *app_id,
     SLEEPDLOG_DEBUG("SELECT (\"%s\", \"%s\", %s)", app_id, key,
                     public_bus ? "public" : "private");
 
-    char *sqlquery = g_strdup_printf(
+    /* Use sqlite3_mprintf's %q so a key or app_id containing quote
+     * characters cannot break out of the string literal (SQL injection
+     * from bus clients). */
+    char *sqlquery = sqlite3_mprintf(
                          "SELECT t1key,app_id,key,uri,params,public_bus,wakeup,calendar,expiry,activity_id,activity_duration_ms FROM AlarmTimeout "
-                         "WHERE app_id=\"%s\" AND key=\"%s\" AND public_bus=%d", app_id, key,
+                         "WHERE app_id='%q' AND key='%q' AND public_bus=%d", app_id, key,
                          public_bus);
 
     rc = sqlite3_get_table(timeout_db, sqlquery, &table, &noRows, &noCols,
                            &zErrMsg);
 
-    g_free(sqlquery);
+    sqlite3_free(sqlquery);
 
     if (rc != SQLITE_OK)
     {
