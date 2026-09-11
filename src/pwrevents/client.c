@@ -103,20 +103,19 @@ static struct PwrEventClientInfo *
 PwrEventClientInfoCreate(void)
 {
     struct PwrEventClientInfo *ret_client;
-    ret_client = malloc(sizeof(struct PwrEventClientInfo));
+    ret_client = calloc(1, sizeof(struct PwrEventClientInfo));
 
     if (!ret_client)
     {
         return NULL;
     }
 
-    ret_client->clientName = NULL;
-    ret_client->clientId = NULL;
-    ret_client->requireSuspendRequest = false;
-    ret_client->requirePrepareSuspend = false;
-
-    ret_client->num_NACK_suspendRequest = 0;
-    ret_client->num_NACK_prepareSuspend = 0;
+    /* calloc zeroes clientName/clientId/applicationName and the counters;
+     * applicationName in particular used to be left uninitialized and was
+     * later handed to g_free(). Mark both votes as not-responded rather
+     * than leaving them as garbage until the first PwrEventVoteInit(). */
+    ret_client->ackSuspendRequest = PWREVENT_CLIENT_NORSP;
+    ret_client->ackPrepareSuspend = PWREVENT_CLIENT_NORSP;
 
     return ret_client;
 }
@@ -253,11 +252,11 @@ PwrEventClientLookup(ClientUID uid)
  * @retval TRUE if client with the given name found and unregistered
  */
 
-bool PwrEventClientUnregisterByName(char *clientName)
+bool PwrEventClientUnregisterByName(const char *clientName)
 {
     if (NULL == clientName)
     {
-        return NULL;
+        return false;
     }
 
     struct PwrEventClientInfo *clientInfo = NULL;
@@ -272,9 +271,9 @@ bool PwrEventClientUnregisterByName(char *clientName)
     {
         clientInfo = value;
 
-        if (!strcmp(clientInfo->clientName, clientName))
+        if (clientInfo->clientName && !strcmp(clientInfo->clientName, clientName))
         {
-            PwrEventClientUnregister(clientInfo->clientId);
+            g_hash_table_iter_remove(&iter);
             return true;
         }
     }

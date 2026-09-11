@@ -76,6 +76,6 @@ bool PwrEventVotePrepareSuspend(ClientUID uid, bool ack);
 bool PwrEventClientsApproveSuspendRequest(void);
 bool PwrEventClientsApprovePrepareSuspend(void);
 
-bool PwrEventClientUnregisterByName(char *clientName);
+bool PwrEventClientUnregisterByName(const char *clientName);
 
 #endif // _PWREVENTS_CLIENT_H_
