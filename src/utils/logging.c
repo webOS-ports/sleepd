@@ -15,6 +15,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <glib.h>
 #include "logging.h"
 
@@ -24,7 +25,7 @@ _good_assert(const char *cond_str, bool cond)
     if (G_UNLIKELY(!(cond)))
     {
         SLEEPDLOG_CRITICAL(MSGID_ASSERTION_FAIL, 1, PMLOGKS(CAUSE, cond_str), "");
-        *(int *)0x00 = 0;
+        abort();
     }
 }
 
