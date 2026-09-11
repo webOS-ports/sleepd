@@ -93,7 +93,7 @@ WaitObjectWait(WaitObj *obj, int ms)
     else
     {
         time.tv_sec = ms / 1000;
-        time.tv_nsec = (ms % 1000) * 1000000000;
+        time.tv_nsec = (ms % 1000) * 1000000L;
     }
 
     return WaitObjectWaitTimeSpec(obj, &time);
