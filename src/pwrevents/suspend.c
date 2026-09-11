@@ -394,7 +394,7 @@ SuspendStateUpdate(PowerEvent power_event)
         next_state = gCurrentStateNode.function();
         SLEEPDLOG_DEBUG("Next state will be '%s'", StateToStr(next_state));
 
-        if (next_state != kPowerStateLast)
+        if (next_state >= 0 && next_state < kPowerStateLast)
         {
             gCurrentStateNode = kStateMachine[next_state];
             /* When suspend cycle is done we're breaking the loop here and waiting for the

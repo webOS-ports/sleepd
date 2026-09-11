@@ -272,7 +272,10 @@ client_new_service(const char *key, const char *clientName)
 static void
 client_vote_clear(const char *key, ShutdownClient *client, void *data)
 {
-    _assert(client != NULL);
+    if (!client)
+    {
+        return;
+    }
 
     client->ack_shutdown = kShutdownReplyNoRsp;
     client->elapsed = 0.0;
