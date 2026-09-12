@@ -832,7 +832,7 @@ StateSleep(void)
         SLEEPDLOG_DEBUG("Going to sleep now");
         if (MachineCanSleep())
         {
-            if (queue_next_wakeup())
+            if (!queue_next_wakeup())
             {
                 SLEEPDLOG_DEBUG("We couldn't sleep because we can't setup the wakeup alarm");
                 nextState = kPowerStateAbortSuspend;
