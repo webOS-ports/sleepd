@@ -72,7 +72,21 @@ g_timer_get_now_us(void)
 static void
 g_timer_set_expiration(GTimerSource *rsource, gint64 now_us)
 {
-    rsource->expiration_us = now_us + (gint64)rsource->interval_ms * USECS_PER_MSEC;
+    guint interval_ms = rsource->interval_ms;
+
+    /*
+     * Never let the expiration land on "now". dispatch() re-arms through here,
+     * so a zero interval produces a source that is ready again the instant it
+     * is dispatched: prepare() returns TRUE, check() returns TRUE, the callback
+     * runs, and round it goes with no poll in between. Callers that mean "as
+     * soon as possible" get the next millisecond instead of a busy loop.
+     */
+    if (interval_ms == 0)
+    {
+        interval_ms = 1;
+    }
+
+    rsource->expiration_us = now_us + (gint64)interval_ms * USECS_PER_MSEC;
 
     if (rsource->granularity)
     {
@@ -189,6 +203,25 @@ g_timer_source_set_interval_seconds(GTimerSource *tsource, guint interval_sec,
                                     gboolean from_poll)
 {
     g_timer_source_set_interval(tsource, interval_sec * 1000, from_poll);
+}
+
+void
+g_timer_source_fire_now(GTimerSource *tsource, gboolean from_poll)
+{
+    tsource->expiration_us = g_timer_get_now_us();
+
+    if (!from_poll)
+    {
+        GMainContext *context = g_source_get_context((GSource *)tsource);
+
+        if (!context)
+        {
+            SLEEPDLOG_DEBUG("Cannot get context for timer_source. Maybe you didn't call g_source_attach()");
+            return;
+        }
+
+        g_main_context_wakeup(context);
+    }
 }
 
 void

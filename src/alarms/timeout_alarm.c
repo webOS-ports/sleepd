@@ -554,9 +554,17 @@ _queue_next_timeout(bool set_callback_fn)
             rtc_expiry = atol(table[ noCols ]);
             long wakeInSeconds = rtc_expiry - now;
 
-            if (wakeInSeconds < 0)
+            /*
+             * Floor at one second, never zero. A zero interval makes the
+             * GTimerSource expire the moment it is re-armed, so dispatch()
+             * re-arms it to "now" and it is immediately ready again - a busy
+             * loop that ran _timer_check() ~40000 times a second and burned
+             * ~25% of a CPU core for as long as an overdue row existed.
+             * The alarm is already late; a second more costs nothing.
+             */
+            if (wakeInSeconds < 1)
             {
-                wakeInSeconds = 0;
+                wakeInSeconds = 1;
             }
             else if(wakeInSeconds > MAX_WAKEUP_SECS)
             {
@@ -602,9 +610,10 @@ _queue_next_timeout(bool set_callback_fn)
 
         long wakeInSeconds = timer_expiry - now;
 
-        if (wakeInSeconds < 0)
+        /* Floor at one second, never zero - see the note above. */
+        if (wakeInSeconds < 1)
         {
-            wakeInSeconds = 0;
+            wakeInSeconds = 1;
         }
         else if(wakeInSeconds > MAX_WAKEUP_SECS)
         {

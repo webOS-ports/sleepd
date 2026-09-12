@@ -246,7 +246,30 @@ ScheduleIdleCheck(int interval_ms, bool fromPoll)
     if (idle_scheduler)
     {
         SLEEPDLOG_DEBUG("Scheduling new idle check in %d ms", interval_ms);
-        g_timer_source_set_interval(idle_scheduler, interval_ms, fromPoll);
+
+        if (interval_ms <= 0)
+        {
+            /*
+             * "Check as soon as possible" (activity.c asks for this whenever an
+             * activity starts or ends). It must not be expressed as a zero
+             * interval: dispatch() re-arms the source from interval_ms, so the
+             * source would be ready again the moment it was dispatched, and
+             * IdleCheck() only reschedules itself on the display-off path - with
+             * the display on it returns straight to the loop. The result was a
+             * permanent busy loop that ran IdleCheck tens of thousands of times
+             * a second and cost ~25% of a CPU core.
+             *
+             * Fire now, but leave the repeat interval at the configured poll
+             * period so the automatic re-arm is sane.
+             */
+            g_timer_source_set_interval(idle_scheduler,
+                                        gSleepConfig.wait_idle_ms, fromPoll);
+            g_timer_source_fire_now(idle_scheduler, fromPoll);
+        }
+        else
+        {
+            g_timer_source_set_interval(idle_scheduler, interval_ms, fromPoll);
+        }
     }
     else
     {
