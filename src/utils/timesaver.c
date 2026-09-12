@@ -64,7 +64,8 @@ timesaver_save()
         //  First write the contents to tmp file and then rename to "time_saver" file
         //  to ensure file integrity with power cut or battery pull.
 
-        int file = open(time_db_tmp, O_CREAT | O_WRONLY, S_IRWXU | S_IRGRP | S_IROTH);
+        int file = open(time_db_tmp, O_CREAT | O_WRONLY | O_TRUNC,
+                        S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
         if (file < 0)
         {
@@ -86,7 +87,7 @@ timesaver_save()
             for (char *buf = timestamp, *end = timestamp + strlen(timestamp);
                     buf < end;)
             {
-                size_t written = write(file, buf, end - buf);
+                ssize_t written = write(file, buf, end - buf);
 
                 if (written <= 0)
                 {

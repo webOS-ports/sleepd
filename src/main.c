@@ -65,6 +65,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <glib.h>
+#include <glib-unix.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <getopt.h>
@@ -88,12 +89,16 @@ bool ChargerStatus(LSHandle *sh, LSMessage *message,
 #define LOG_DOMAIN "SLEEPD-INIT: "
 
 /**
- * Handle process signals asking us to terminate running of our service
+ * Handle process signals asking us to terminate running of our service.
+ *
+ * Dispatched from the main loop via g_unix_signal_add(), not from signal
+ * context: g_main_loop_quit() is not async-signal-safe.
  */
-void
-term_handler(int signal)
+static gboolean
+term_handler(gpointer data)
 {
     g_main_loop_quit(mainloop);
+    return G_SOURCE_REMOVE;
 }
 
 
@@ -195,14 +200,14 @@ main(int argc, char **argv)
 {
     bool retVal;
     int ret = -1;
+    mainloop = g_main_loop_new(NULL, FALSE);
+
     /*
      * Register a function to be able to gracefully handle termination signals
      * from the OS or other processes.
      */
-    signal(SIGTERM, term_handler);
-    signal(SIGINT, term_handler);
-
-    mainloop = g_main_loop_new(NULL, FALSE);
+    g_unix_signal_add(SIGTERM, term_handler, NULL);
+    g_unix_signal_add(SIGINT, term_handler, NULL);
 
     /*
      *  initialize the lunaservice and we want it before all the init
@@ -219,9 +224,9 @@ main(int argc, char **argv)
     if (retVal)
     {
         retVal = LSGmainAttach(webos_sh, mainloop, &lserror);
-
     }
-    else
+
+    if (!retVal)
     {
         SLEEPDLOG_CRITICAL(MSGID_SRVC_REGISTER_FAIL, 1, PMLOGKS(ERRTEXT,
                            lserror.message), "Could not initialize com.webos.service.power");
@@ -237,9 +242,9 @@ main(int argc, char **argv)
     if (retVal)
     {
         retVal = LSGmainAttach(lsh, mainloop, &lserror);
-
     }
-    else
+
+    if (!retVal)
     {
         SLEEPDLOG_CRITICAL(MSGID_SRVC_REGISTER_FAIL, 1, PMLOGKS(ERRTEXT,
                            lserror.message), "Could not initialize com.palm.sleep");
@@ -276,7 +281,10 @@ main(int argc, char **argv)
 
     g_main_loop_run(mainloop);
 
-error:
     g_main_loop_unref(mainloop);
     return 0;
+
+error:
+    g_main_loop_unref(mainloop);
+    return 1;
 }

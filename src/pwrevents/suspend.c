@@ -86,12 +86,11 @@ enum
     kResumeAbortSuspend
 };
 
-static char *resume_type_descriptions[] =
+static const char *resume_type_descriptions[] =
 {
-    "kernel",
-    "pwrevent_activity",
-    "pwrevent_non_idle",
-    "abort_suspend",
+    [kResumeTypeKernel]   = "kernel",
+    [kResumeTypeActivity] = "pwrevent_activity",
+    [kResumeAbortSuspend] = "abort_suspend",
 };
 
 // A PowerStateProc processes the current state and returns the next state
@@ -228,8 +227,6 @@ const char* StateToStr(PowerState state)
     default:
         return "unknown";
     }
-
-     return NULL;
 }
 
 void
@@ -249,7 +246,30 @@ ScheduleIdleCheck(int interval_ms, bool fromPoll)
     if (idle_scheduler)
     {
         SLEEPDLOG_DEBUG("Scheduling new idle check in %d ms", interval_ms);
-        g_timer_source_set_interval(idle_scheduler, interval_ms, fromPoll);
+
+        if (interval_ms <= 0)
+        {
+            /*
+             * "Check as soon as possible" (activity.c asks for this whenever an
+             * activity starts or ends). It must not be expressed as a zero
+             * interval: dispatch() re-arms the source from interval_ms, so the
+             * source would be ready again the moment it was dispatched, and
+             * IdleCheck() only reschedules itself on the display-off path - with
+             * the display on it returns straight to the loop. The result was a
+             * permanent busy loop that ran IdleCheck tens of thousands of times
+             * a second and cost ~25% of a CPU core.
+             *
+             * Fire now, but leave the repeat interval at the configured poll
+             * period so the automatic re-arm is sane.
+             */
+            g_timer_source_set_interval(idle_scheduler,
+                                        gSleepConfig.wait_idle_ms, fromPoll);
+            g_timer_source_fire_now(idle_scheduler, fromPoll);
+        }
+        else
+        {
+            g_timer_source_set_interval(idle_scheduler, interval_ms, fromPoll);
+        }
     }
     else
     {
@@ -378,8 +398,9 @@ resched:
 
             ScheduleIdleCheck(wait_idle_ms, true);
         }
-        return TRUE;
     }
+
+    return TRUE;
 }
 
 static gboolean
@@ -396,7 +417,7 @@ SuspendStateUpdate(PowerEvent power_event)
         next_state = gCurrentStateNode.function();
         SLEEPDLOG_DEBUG("Next state will be '%s'", StateToStr(next_state));
 
-        if (next_state != kPowerStateLast)
+        if (next_state >= 0 && next_state < kPowerStateLast)
         {
             gCurrentStateNode = kStateMachine[next_state];
             /* When suspend cycle is done we're breaking the loop here and waiting for the
@@ -811,15 +832,14 @@ StateSleep(void)
         SLEEPDLOG_DEBUG("Going to sleep now");
         if (MachineCanSleep())
         {
-            if (queue_next_wakeup())
+            if (!queue_next_wakeup())
             {
-                SLEEPDLOG_DEBUG("We couldn't sleep because there can't setup wakup alarm");
-                // let the system sleep now.
+                SLEEPDLOG_DEBUG("We couldn't sleep because we can't setup the wakeup alarm");
                 nextState = kPowerStateAbortSuspend;
             }
             else if (!MachineSleep())
             {
-                SLEEPDLOG_DEBUG("We couldn't sleep because there can't setup wakup alarm");
+                SLEEPDLOG_DEBUG("We couldn't sleep because the suspend request failed");
                 nextState = kPowerStateAbortSuspend;
             }
         }
@@ -928,6 +948,9 @@ DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
     if (state_obj) {
         state = json_object_get_string(state_obj);
 
+        if (!state)
+            state = "";
+
         if (strncmp(state, "off", 3) == 0)
             gDisplayIsOn = false;
         else if (strncmp(state, "on", 2) == 0 || strncmp(state, "dimmed", 6) == 0)
@@ -937,6 +960,10 @@ DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
     event_obj = json_object_object_get(root_obj, "event");
     if (event_obj) {
         event = json_object_get_string(event_obj);
+
+        if (!event)
+            event = "";
+
         if (strncmp(event, "displayOn", 9) == 0)
             gDisplayIsOn = true;
         else if (strncmp(event, "displayOff", 10) == 0)

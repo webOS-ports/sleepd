@@ -79,7 +79,7 @@
  * again check if the next wakeup time is sane (less than 7 days)
  * and set it accordingly
  */
-#define MAX_WAKEUP_SECS                7*24*60*60
+#define MAX_WAKEUP_SECS                (7*24*60*60)
 #define MIN_WAKEUP_SECS                10
 
 typedef enum
@@ -158,22 +158,6 @@ _print_timeout(const char *message, const char *app_id, const char *key,
 }
 
 static void _update_timeouts(void);
-
-/**
-* @brief Called when a new alarm from the RTC is fired.
-*/
-static void _rtc_alarm_fired(nyx_device_handle_t handle,
-                             nyx_callback_status_t status, void *data)
-{
-    SLEEPDLOG_DEBUG("RTC alarm fired");
-
-    TriggerResume("rtc", kPowerEventNone);
-
-#if 0
-    _update_timeouts();
-#endif
-}
-
 
 /**
 * @brief Response to timeout message.
@@ -365,8 +349,8 @@ _recalculate_timeouts(time_t delta)
             }
             else
             {
-                rc = sqlite3_bind_int(st, 1, new_expiry);
-                rc = sqlite3_bind_int(st, 2, atoi(table_id));
+                sqlite3_bind_int(st, 1, new_expiry);
+                sqlite3_bind_int(st, 2, atoi(table_id));
                 _sql_step_finalize(__func__, st);
             }
         }
@@ -448,7 +432,7 @@ _expire_timeouts(void)
 
         if (rc == SQLITE_OK)
         {
-            rc = sqlite3_bind_int(st, 1, atoi(timeout.table_id));
+            sqlite3_bind_int(st, 1, atoi(timeout.table_id));
             _sql_step_finalize(__func__, st);
         }
         else
@@ -514,9 +498,9 @@ timeout_get_next_wakeup(time_t *expiry, gchar **app_id, gchar **key)
 *        and a timer for non-wakeup timeouts.
 *
 * @param set_callback_fn
-*  If set_callback_fn is set to true, the callback function _rtc_alarm_fired
-*  will be triggered as soon as the alarm is fired.
-*  It will be set to true as long as device is awake, and will be set to false when
+*  If set_callback_fn is set to true, the wakeup timer source is (re)armed
+*  for the next wakeup-capable timeout.
+*  It is set to true as long as device is awake, and false when
 *  the device suspends.
 *
 * The non-wakeup timeout timer is necessary so that
@@ -570,9 +554,17 @@ _queue_next_timeout(bool set_callback_fn)
             rtc_expiry = atol(table[ noCols ]);
             long wakeInSeconds = rtc_expiry - now;
 
-            if (wakeInSeconds < 0)
+            /*
+             * Floor at one second, never zero. A zero interval makes the
+             * GTimerSource expire the moment it is re-armed, so dispatch()
+             * re-arms it to "now" and it is immediately ready again - a busy
+             * loop that ran _timer_check() ~40000 times a second and burned
+             * ~25% of a CPU core for as long as an overdue row existed.
+             * The alarm is already late; a second more costs nothing.
+             */
+            if (wakeInSeconds < 1)
             {
-                wakeInSeconds = 0;
+                wakeInSeconds = 1;
             }
             else if(wakeInSeconds > MAX_WAKEUP_SECS)
             {
@@ -618,9 +610,10 @@ _queue_next_timeout(bool set_callback_fn)
 
         long wakeInSeconds = timer_expiry - now;
 
-        if (wakeInSeconds < 0)
+        /* Floor at one second, never zero - see the note above. */
+        if (wakeInSeconds < 1)
         {
-            wakeInSeconds = 0;
+            wakeInSeconds = 1;
         }
         else if(wakeInSeconds > MAX_WAKEUP_SECS)
         {
@@ -776,15 +769,18 @@ _timeout_read(_AlarmTimeoutNonConst *timeout, const char *app_id,
     SLEEPDLOG_DEBUG("SELECT (\"%s\", \"%s\", %s)", app_id, key,
                     public_bus ? "public" : "private");
 
-    char *sqlquery = g_strdup_printf(
+    /* Use sqlite3_mprintf's %q so a key or app_id containing quote
+     * characters cannot break out of the string literal (SQL injection
+     * from bus clients). */
+    char *sqlquery = sqlite3_mprintf(
                          "SELECT t1key,app_id,key,uri,params,public_bus,wakeup,calendar,expiry,activity_id,activity_duration_ms FROM AlarmTimeout "
-                         "WHERE app_id=\"%s\" AND key=\"%s\" AND public_bus=%d", app_id, key,
+                         "WHERE app_id='%q' AND key='%q' AND public_bus=%d", app_id, key,
                          public_bus);
 
     rc = sqlite3_get_table(timeout_db, sqlquery, &table, &noRows, &noCols,
                            &zErrMsg);
 
-    g_free(sqlquery);
+    sqlite3_free(sqlquery);
 
     if (rc != SQLITE_OK)
     {
@@ -888,6 +884,14 @@ _timeout_clear(const char *app_id, const char *key, bool public_bus)
 {
     bool retVal;
     retVal = _timeout_delete(app_id, key, public_bus);
+
+    if (retVal)
+    {
+        /* the DELETE executing is not the same as it matching anything:
+         * report "not found" when no row was removed, so the handler's
+         * "Could not find key." error path can actually trigger. */
+        retVal = sqlite3_changes(timeout_db) > 0;
+    }
 
     if (retVal)
     {
@@ -1420,14 +1424,14 @@ _alarms_timeout_init(void)
 {
     bool retVal;
 
-    gchar *timeout_db_name = g_build_filename(gSleepConfig.preference_dir,
-                             TIMEOUT_DATABASE_NAME, NULL);
-
     if (gSleepConfig.disable_rtc_alarms)
     {
         SLEEPDLOG_DEBUG("RTC alarms disabled");
         return 0;
     }
+
+    gchar *timeout_db_name = g_build_filename(gSleepConfig.preference_dir,
+                             TIMEOUT_DATABASE_NAME, NULL);
 
     gchar *timeout_db_path = g_path_get_dirname(timeout_db_name);
     (void)g_mkdir_with_parents(timeout_db_path, S_IRWXU);
@@ -1439,6 +1443,7 @@ _alarms_timeout_init(void)
     {
         SLEEPDLOG_ERROR(MSGID_DB_OPEN_ERR, 1, PMLOGKS("DBName", timeout_db_name),
                         "Failed to open database");
+        g_free(timeout_db_name);
         goto error;
     }
 

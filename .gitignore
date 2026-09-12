@@ -20,3 +20,4 @@ CMakeFiles
 doc/Doxyfile
 doc/html
 patches
+tests/unit/out/

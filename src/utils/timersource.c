@@ -37,7 +37,7 @@
 struct _GTimerSource
 {
     GSource  source;
-    GTimeVal expiration;   /* Should I just make this use Clock* API? */
+    gint64   expiration_us;   /* monotonic clock, microseconds */
     guint    interval_ms;     /* In milisecs */
     guint    granularity;
 };
@@ -57,83 +57,66 @@ GSourceFuncs g_timer_source_funcs =
 
 #define USECS_PER_SEC 1000000
 #define USECS_PER_MSEC 1000
-static void
-g_timer_set_expiration(GTimerSource *rsource, GTimeVal *now)
+
+/* Current monotonic time in microseconds (same clock as ClockGetTime). */
+static gint64
+g_timer_get_now_us(void)
 {
-    guint interval_secs = rsource->interval_ms / 1000;
-    glong interval_usecs = (rsource->interval_ms - interval_secs * 1000) * 1000;
-
-    rsource->expiration.tv_sec = now->tv_sec + interval_secs;
-    rsource->expiration.tv_usec = now->tv_usec + interval_usecs;
-
-    if (rsource->expiration.tv_usec >= USECS_PER_SEC)
-    {
-        rsource->expiration.tv_usec -= USECS_PER_SEC;
-        rsource->expiration.tv_sec++;
-    }
-
-    if (rsource->granularity)
-    {
-        gint gran;
-        gint remainder;
-
-        gran = rsource->granularity * USECS_PER_MSEC;
-        remainder = rsource->expiration.tv_usec % gran;
-
-        if (remainder >= gran / 4)
-        {
-            rsource->expiration.tv_usec += gran;
-        }
-
-        rsource->expiration.tv_usec -= remainder;
-
-        while (rsource->expiration.tv_usec > USECS_PER_SEC)
-        {
-            rsource->expiration.tv_usec -= USECS_PER_SEC;
-            rsource->expiration.tv_sec++;
-        }
-    }
-}
-
-static void
-g_timer_get_current_time(GTimerSource *tsource, GTimeVal *now)
-{
-    g_return_if_fail(now != NULL);
-
     // TODO: We should do a time_is_current and skip syscalls
     struct timespec tv;
     ClockGetTime(&tv);
 
-    now->tv_sec = tv.tv_sec;
-    now->tv_usec = tv.tv_nsec / 1000;
+    return (gint64)tv.tv_sec * USECS_PER_SEC + tv.tv_nsec / 1000;
+}
+
+static void
+g_timer_set_expiration(GTimerSource *rsource, gint64 now_us)
+{
+    guint interval_ms = rsource->interval_ms;
+
+    /*
+     * Never let the expiration land on "now". dispatch() re-arms through here,
+     * so a zero interval produces a source that is ready again the instant it
+     * is dispatched: prepare() returns TRUE, check() returns TRUE, the callback
+     * runs, and round it goes with no poll in between. Callers that mean "as
+     * soon as possible" get the next millisecond instead of a busy loop.
+     */
+    if (interval_ms == 0)
+    {
+        interval_ms = 1;
+    }
+
+    rsource->expiration_us = now_us + (gint64)interval_ms * USECS_PER_MSEC;
+
+    if (rsource->granularity)
+    {
+        gint64 gran = (gint64)rsource->granularity * USECS_PER_MSEC;
+        gint64 remainder = rsource->expiration_us % gran;
+
+        if (remainder >= gran / 4)
+        {
+            rsource->expiration_us += gran;
+        }
+
+        rsource->expiration_us -= remainder;
+    }
 }
 
 static gboolean
 g_timer_source_prepare(GSource    *source,
                        gint       *timeout_ms)
 {
-    GTimeVal now;
-
     GTimerSource *tsource = (GTimerSource *)source;
 
-    g_timer_get_current_time(tsource, &now);
-
-    // assume monotic clock
-
-    glong msec = (tsource->expiration.tv_sec - now.tv_sec) * 1000;
+    gint64 msec = (tsource->expiration_us - g_timer_get_now_us()) / 1000;
 
     if (msec < 0)
     {
         msec = 0;
     }
-    else
+    else if (msec > G_MAXINT)
     {
-        msec += (tsource->expiration.tv_usec - now.tv_usec) / 1000;
-
-        if (msec < 0)
-        {
-            msec = 0;
-        }
+        msec = G_MAXINT;
     }
 
     *timeout_ms = (gint)msec;
@@ -144,14 +127,9 @@ g_timer_source_prepare(GSource    *source,
 static gboolean
 g_timer_source_check(GSource *source)
 {
-    GTimeVal now;
     GTimerSource *tsource = (GTimerSource *)source;
 
-    g_timer_get_current_time(tsource, &now);
-
-    return (tsource->expiration.tv_sec < now.tv_sec) ||
-           ((tsource->expiration.tv_sec == now.tv_sec) &&
-            (tsource->expiration.tv_usec <= now.tv_usec));
+    return tsource->expiration_us <= g_timer_get_now_us();
 }
 
 static gboolean
@@ -168,9 +146,7 @@ g_timer_source_dispatch(GSource *source,
 
     if (callback(user_data))
     {
-        GTimeVal now;
-        g_timer_get_current_time(tsource, &now);
-        g_timer_set_expiration(tsource, &now);
+        g_timer_set_expiration(tsource, g_timer_get_now_us());
         return TRUE;
     }
     else
@@ -197,14 +173,10 @@ g_timer_source_new(guint interval_ms, guint granularity_ms)
     source = g_source_new(&g_timer_source_funcs, sizeof(GTimerSource));
     tsource = (GTimerSource *)source;
 
-    GTimeVal now;
-
     tsource->interval_ms = interval_ms;
     tsource->granularity = granularity_ms;
 
-    g_timer_get_current_time(tsource, &now);
-
-    g_timer_set_expiration(tsource, &now);
+    g_timer_set_expiration(tsource, g_timer_get_now_us());
 
     return tsource;
 }
@@ -218,14 +190,10 @@ g_timer_source_new_seconds(guint interval_sec)
     source = g_source_new(&g_timer_source_funcs, sizeof(GTimerSource));
     tsource = (GTimerSource *)source;
 
-    GTimeVal now;
-
     tsource->interval_ms = 1000 * interval_sec;
     tsource->granularity = 1000;
 
-    g_timer_get_current_time(tsource, &now);
-
-    g_timer_set_expiration(tsource, &now);
+    g_timer_set_expiration(tsource, g_timer_get_now_us());
 
     return tsource;
 }
@@ -238,15 +206,30 @@ g_timer_source_set_interval_seconds(GTimerSource *tsource, guint interval_sec,
 }
 
 void
+g_timer_source_fire_now(GTimerSource *tsource, gboolean from_poll)
+{
+    tsource->expiration_us = g_timer_get_now_us();
+
+    if (!from_poll)
+    {
+        GMainContext *context = g_source_get_context((GSource *)tsource);
+
+        if (!context)
+        {
+            SLEEPDLOG_DEBUG("Cannot get context for timer_source. Maybe you didn't call g_source_attach()");
+            return;
+        }
+
+        g_main_context_wakeup(context);
+    }
+}
+
+void
 g_timer_source_set_interval(GTimerSource *tsource, guint interval_ms,
                             gboolean from_poll)
 {
-    GTimeVal now;
-
-    g_timer_get_current_time(tsource, &now);
-
     tsource->interval_ms = interval_ms;
-    g_timer_set_expiration(tsource, &now);
+    g_timer_set_expiration(tsource, g_timer_get_now_us());
 
     if (!from_poll)
     {

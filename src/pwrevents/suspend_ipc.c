@@ -369,9 +369,6 @@ cleanup:
 bool
 activityStartCallback(LSHandle *sh, LSMessage *message, void *user_data)
 {
-    LSError lserror;
-    LSErrorInit(&lserror);
-
     const char *payload = LSMessageGetPayload(message);
 
     struct json_object *object = json_tokener_parse(payload);
@@ -440,9 +437,6 @@ end:
 bool
 activityEndCallback(LSHandle *sh, LSMessage *message, void *user_data)
 {
-    LSError lserror;
-    LSErrorInit(&lserror);
-
     const char *payload = LSMessageGetPayload(message);
 
     struct json_object *object = json_tokener_parse(payload);
@@ -1059,13 +1053,9 @@ SuspendIPCInit(void)
     {
         SLEEPDLOG_WARNING(MSGID_LS_SUBSCRIB_SETFUN_FAIL, 0,
                           "Error in setting cancel function");
-        goto ls_error;
+        LSErrorPrint(&lserror, stderr);
+        LSErrorFree(&lserror);
     }
-
-ls_error:
-    LSErrorPrint(&lserror, stderr);
-    LSErrorFree(&lserror);
-
 }
 
 LSMethod com_palm_suspend_methods[] =

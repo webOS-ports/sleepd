@@ -34,4 +34,12 @@ void g_timer_source_set_interval(GTimerSource *tsource, guint interval,
 
 guint g_timer_source_get_interval_ms(GTimerSource *tsource);
 
+/*
+ * Make the source fire as soon as the loop next runs, without disturbing its
+ * repeat interval. Use this instead of setting the interval to zero: dispatch()
+ * re-arms from the interval, so a zero there means the source is ready again
+ * the instant it is dispatched, which is a busy loop rather than "run now".
+ */
+void g_timer_source_fire_now(GTimerSource *tsource, gboolean from_poll);
+
 #endif

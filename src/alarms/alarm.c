@@ -600,6 +600,13 @@ alarmQuery(LSHandle *sh, LSMessage *message, void *ctx)
 invalid_format:
     retVal = LSMessageReply(sh, message, "{\"returnValue\":false,"
                             "\"errorText\":\"alarmQuery parameters are missing.\"}", &lserror);
+
+    if (!retVal)
+    {
+        LSErrorPrint(&lserror, stderr);
+        LSErrorFree(&lserror);
+    }
+
     goto cleanup;
 malformed_json:
     LSMessageReplyErrorBadJSON(sh, message);
