@@ -604,13 +604,14 @@ resumeCallback(LSHandle *sh, LSMessage *message, void *user_data)
 {
     PMLOG_TRACE("Received resume");
 
-    if (!IsSuspended()) {
-        LSMessageReplyErrorUnknown(sh, message);
-        return true;
-    }
-
-    /* FIXME get reason as argument from the caller */
-    TriggerResume(NULL, kPowerEventNone);
+    /*
+     * Resume even when the kernel never went down. IsSuspended() is only true
+     * inside the narrow kernel-resume window, so gating on it rejected almost
+     * every request - and a client that entered a suspended state back when
+     * prepareSuspend was broadcast is waiting on the resume signal to leave it.
+     * Refusing here left it there for good.
+     */
+    ForceResume("resume requested over luna");
 
     LSMessageReplySuccess(sh, message);
 

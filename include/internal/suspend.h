@@ -46,4 +46,10 @@ bool GetSuspendSettings(LSHandle *sh, LSMessage *message, void *ctx);
 int com_palm_suspend_lunabus_init(void);
 bool IsSuspended(void);
 
+/**
+ * @brief Unwind the suspend path on request, whether or not the kernel has
+ *        actually gone down yet, and tell subscribers the device is awake.
+ */
+void ForceResume(const char *reason);
+
 #endif
