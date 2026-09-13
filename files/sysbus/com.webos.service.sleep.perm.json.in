@@ -5,7 +5,8 @@
         "activity.wakeup",
         "batteryd.management",
         "sleep.operation",
-        "sleep.management"
+        "sleep.management",
+        "display.query"
     ],
     "com.webos.service.alarm": [
         "activity.query",
@@ -13,7 +14,8 @@
         "activity.wakeup",
         "batteryd.management",
         "sleep.operation",
-        "sleep.management"
+        "sleep.management",
+        "display.query"
     ],
     "com.webos.service.power": [
         "activity.query",
@@ -21,6 +23,7 @@
         "activity.wakeup",
         "batteryd.management",
         "sleep.operation",
-        "sleep.management"
+        "sleep.management",
+        "display.query"
     ]
 }

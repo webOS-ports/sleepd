@@ -307,6 +307,21 @@ IdleCheck(gpointer ctx)
 
     SLEEPDLOG_DEBUG("IdleCheck: state %s", StateToStr(gCurrentStateNode.state));
 
+    /*
+     * Drop activities that have outlived their duration whatever the display
+     * is doing. Each one holds a kernel wakelock that _activity_stop_activity()
+     * is the only thing that releases, and the sole call to this used to sit
+     * inside the display-off branch below - so with the display on, or merely
+     * believed to be on, a one-second activity kept its wakelock indefinitely.
+     *
+     * Observed on a PinePhone Pro: com.webos.service.alarm.timeout_fired asks
+     * for TIMEOUT_KEEP_ALIVE_MS (1000ms) and its wakelock was still held
+     * minutes later, released only when the next timeout fired and
+     * _activity_start() stopped the previous instance by name.
+     */
+    ClockGetTime(&now);
+    PwrEventActivityRemoveExpired(&now);
+
     if (!IsDisplayOn())
     {
         SLEEPDLOG_DEBUG("IdleCheck: display off");
