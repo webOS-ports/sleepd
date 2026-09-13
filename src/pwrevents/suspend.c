@@ -1073,6 +1073,31 @@ TriggerResume(const char *reason, PowerEvent event)
  *
  * @return True, if device is currently suspended, False otherwise.
  */
+/**
+ * @brief Resume on request even when the kernel never went down.
+ *
+ * A client that entered a suspended state on prepareSuspend is waiting for the
+ * resume signal to leave it again. If the suspend is still pending, or was
+ * aborted, IsSuspended() is false and the old code answered the resume request
+ * with an error and broadcast nothing - leaving that client stuck in a state
+ * only the resume signal can end. luna-displaymanager is exactly such a client:
+ * its DisplayOffSuspended records where to restore to and waits, so the display
+ * stayed off and the power key did nothing at all until the process restarted.
+ *
+ * Drive the state machine as a normal resume does, and broadcast regardless, so
+ * asking to wake up always results in subscribers being told the device is
+ * awake.
+ */
+void
+ForceResume(const char *reason)
+{
+    SLEEPDLOG_DEBUG("%s: state %s, reason %s", __PRETTY_FUNCTION__,
+                    StateToStr(gCurrentStateNode.state), reason ? reason : "(none)");
+
+    TriggerResume(reason, kPowerEventNone);
+    SendResume(kResumeAbortSuspend, (char *) (reason ? reason : "resume requested"));
+}
+
 bool
 IsSuspended(void)
 {
