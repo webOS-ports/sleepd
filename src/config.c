@@ -127,6 +127,8 @@ config_init(void)
         /// [suspend]
         CONFIG_GET_INT(config_file, "suspend", "wait_idle_ms",
                        gSleepConfig.wait_idle_ms);
+        CONFIG_GET_INT(config_file, "suspend", "wait_idle_granularity_ms",
+                       gSleepConfig.wait_idle_granularity_ms);
         CONFIG_GET_INT(config_file, "suspend", "after_resume_idle_ms",
                        gSleepConfig.after_resume_idle_ms);
         CONFIG_GET_INT(config_file, "suspend", "wait_suspend_response_ms",
