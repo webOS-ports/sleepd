@@ -108,20 +108,32 @@ g_timer_source_prepare(GSource    *source,
 {
     GTimerSource *tsource = (GTimerSource *)source;
 
-    gint64 msec = (tsource->expiration_us - g_timer_get_now_us()) / 1000;
+    gint64 remaining_us = tsource->expiration_us - g_timer_get_now_us();
+    gint64 msec;
 
-    if (msec < 0)
+    if (remaining_us <= 0)
     {
-        msec = 0;
+        *timeout_ms = 0;
+        return TRUE;
     }
-    else if (msec > G_MAXINT)
+
+    /*
+     * Round up, never down: a source due in 800us is not due yet, and
+     * reporting "ready, poll timeout 0" for it makes the main loop poll with
+     * no timeout, find check() false, and spin until the millisecond passes.
+     * The 1ms floor in g_timer_set_expiration() depends on this to stay a
+     * floor.
+     */
+    msec = (remaining_us + 999) / 1000;
+
+    if (msec > G_MAXINT)
     {
         msec = G_MAXINT;
     }
 
     *timeout_ms = (gint)msec;
 
-    return (msec == 0);
+    return FALSE;
 }
 
 static gboolean
