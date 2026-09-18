@@ -330,7 +330,15 @@ IdleCheck(gpointer ctx)
         return G_SOURCE_REMOVE;
     }
 
-    SLEEPDLOG_DEBUG("IdleCheck: state %s", StateToStr(gCurrentStateNode.state));
+    /*
+     * With the display on there is nothing to decide, and this runs at
+     * 2 Hz for as long as the screen is lit; only narrate the display-off
+     * polls, where the outcome varies.
+     */
+    if (!IsDisplayOn())
+    {
+        SLEEPDLOG_DEBUG("IdleCheck: state %s", StateToStr(gCurrentStateNode.state));
+    }
 
     /*
      * Drop activities that have outlived their duration whatever the display
@@ -1017,9 +1025,10 @@ DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
 
         case DisplayStatusError:
         default:
-            SLEEPDLOG_WARNING(MSGID_SUBSCRIBE_DISP_MGR_FAIL, 1,
-                              PMLOGKS("payload", payload ? payload : "(null)"),
-                              "Display status subscription failed; assuming the display is on");
+            /* the payload is JSON itself, so it cannot go into a PmLog kv */
+            SLEEPDLOG_WARNING(MSGID_SUBSCRIBE_DISP_MGR_FAIL, 0,
+                              "Display status subscription ended; assuming the display is on");
+            SLEEPDLOG_DEBUG("Display status reply was: %s", payload ? payload : "(null)");
             gDisplayIsOn = true;
             sDisplayStatusToken = LSMESSAGE_TOKEN_INVALID;
             break;
@@ -1213,12 +1222,23 @@ TriggerSuspend(const char *reason, PowerEvent event)
 void
 TriggerResume(const char *reason, PowerEvent event)
 {
-    SLEEPDLOG_DEBUG("%s: state %s", __PRETTY_FUNCTION__, StateToStr(gCurrentStateNode.state));
-
     if (!suspend_loop)
     {
         return;
     }
+
+    /*
+     * In the On state with no event the machine has nothing to do, and
+     * every activityStart lands here: skip the four-line no-op cycle it
+     * would otherwise log.
+     */
+    if (event == kPowerEventNone && gCurrentStateNode.state == kPowerStateOn)
+    {
+        return;
+    }
+
+    SLEEPDLOG_DEBUG("%s: state %s (%s)", __PRETTY_FUNCTION__,
+                    StateToStr(gCurrentStateNode.state), reason ? reason : "");
 
     GSource *source = g_idle_source_new();
     g_source_set_callback(source,
