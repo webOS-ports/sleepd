@@ -144,16 +144,21 @@ static PowerState StateAbortSuspend(void);
  * "AbortSuspend" state.
  *
  * 5. Sleep: In this state it will first send the "Suspended" signal to everybody. If any activity is active
- * at this point it will go resume by going to the "ActivityResume" state, else it will set the next state to
- * "KernelResume" and let the machine sleep.
+ * at this point it will go resume by going to the "ActivityResume" state. Otherwise it arms the RTC for the
+ * next wakeup timeout and calls MachineSleep(), which blocks for as long as the kernel is suspended. When
+ * it returns true the kernel has been down and is back up: the next state is "KernelResume". When it
+ * returns false the kernel never suspended (a wakeup source raced the write, or the platform refused):
+ * the next state is "AbortSuspend".
  *
- * 6. KernelResume: This is the default state in which the system will be after waking up from sleep. It will
- * broadcast the "Resume" signal , schedule the next IdleCheck sequence and go to the "On" state.
+ * 6. KernelResume: Reached, in the same pass through the state loop, right after the kernel wakes up. It
+ * tells the platform to resume, broadcasts the "Resume" signal, schedules the next IdleCheck
+ * after_resume_idle_ms later and goes to the "On" state.
  *
  * 7. ActivityResume: It will broadcast the "Resume" signal schedule the next IdleCheck sequence and go back
  * to "On" state.
  *
- * 8. AbortSuspend: It will broadcast the "Resume" signal and go back to the "On" state.
+ * 8. AbortSuspend: It will broadcast the "Resume" signal, schedule the next IdleCheck after_resume_idle_ms
+ * later (which is the retry loop for a raced suspend) and go back to the "On" state.
  */
 
 /**
@@ -204,6 +209,9 @@ struct timespec sWakeRTC;
 bool gDisplayIsOn = true;
 static LSMessageToken sDisplayStatusToken = LSMESSAGE_TOKEN_INVALID;
 static void *sDisplayServerStatusCookie = NULL;
+
+/* whether the suspend cycle in progress was started by forceSuspend */
+static bool gForcedSuspend = false;
 
 void SuspendIPCInit(void);
 int SendSuspendRequest(const char *message);
@@ -306,11 +314,6 @@ IdleCheck(gpointer ctx)
 
     struct timespec now;
     int next_idle_ms = 0;
-
-    if (gCurrentStateNode.state == kPowerStateKernelResume) {
-        SLEEPDLOG_DEBUG("Not rescheduling idle check cause we're in sleep mode");
-        return TRUE;
-    }
 
     SLEEPDLOG_DEBUG("IdleCheck: state %s", StateToStr(gCurrentStateNode.state));
 
@@ -442,12 +445,6 @@ SuspendStateUpdate(PowerEvent power_event)
         if (next_state >= 0 && next_state < kPowerStateLast)
         {
             gCurrentStateNode = kStateMachine[next_state];
-            /* When suspend cycle is done we're breaking the loop here and waiting for the
-            * upper stack to trigger the resume cycle */
-            if (next_state == kPowerStateKernelResume)
-            {
-                break;
-            }
         }
     }
     while (next_state != kPowerStateLast);
@@ -514,6 +511,12 @@ StateOn(void)
             break;
     }
 
+    /*
+     * gSuspendEvent is consumed here, so later states cannot tell a forced
+     * cycle from an idle one by looking at it; remember it for StateSleep,
+     * where forceSuspend is meant to override the charger and activity vetoes.
+     */
+    gForcedSuspend = (gSuspendEvent == kPowerEventForceSuspend);
     gSuspendEvent = kPowerEventNone;
 
     return next_state;
@@ -805,8 +808,16 @@ CheckActivitiesActive(struct timespec *now)
 
 /**
  * @brief In this state it will first send the "Suspended" signal to everybody. If any activity is active
- * at this point it will go resume by going to the "ActivityResume" state, else it will set the next state
- * to "KernelResume" and let the machine sleep.
+ * at this point it will go resume by going to the "ActivityResume" state, else it arms the wakeup alarm and
+ * lets the machine sleep.
+ *
+ * MachineSleep() blocks until the kernel has suspended and resumed again, so on a true return the device
+ * has already been through a full suspend cycle and the next state is "KernelResume". On a false return
+ * the kernel never went down - a wakeup source raced the suspend write, or the platform refused - and the
+ * next state is "AbortSuspend", which schedules the retry.
+ *
+ * A forced suspend (forceSuspend over luna) skips the charger and activity vetoes, as its documentation
+ * has always promised; it does not skip the client vote, the wakeup alarm, or kernel wakelocks.
  *
  * @retval PowerState Next state.
  */
@@ -814,8 +825,7 @@ CheckActivitiesActive(struct timespec *now)
 static PowerState
 StateSleep(void)
 {
-    int nextState =
-        kPowerStateKernelResume; // assume a normal sleep ended by some kernel event
+    int nextState = kPowerStateAbortSuspend;
 
     PMLOG_TRACE("State Sleep, We will try to go to sleep now");
 
@@ -841,39 +851,42 @@ StateSleep(void)
     timesaver_save();
 
     // if any activities were started, abort suspend.
-    if (gSuspendEvent != kPowerEventForceSuspend &&
-            !CheckActivitiesActive(&sTimeOnSuspended))
+    if (!gForcedSuspend && !CheckActivitiesActive(&sTimeOnSuspended))
     {
         SLEEPDLOG_DEBUG("aborting sleep because of current activity");
         PwrEventActivityPrintFrom(&sTimeOnSuspended);
         nextState = kPowerStateActivityResume;
     }
-
+    else if (!gForcedSuspend && !MachineCanSleep())
+    {
+        SLEEPDLOG_DEBUG("We couldn't sleep because charger was connected");
+    }
+    else if (!queue_next_wakeup())
+    {
+        SLEEPDLOG_DEBUG("We couldn't sleep because we can't setup the wakeup alarm");
+    }
     else
     {
-        SLEEPDLOG_DEBUG("Going to sleep now");
-        if (MachineCanSleep())
+        SLEEPDLOG_DEBUG("Going to sleep now%s", gForcedSuspend ? " (forced)" : "");
+
+        if (MachineSleep())
         {
-            if (!queue_next_wakeup())
-            {
-                SLEEPDLOG_DEBUG("We couldn't sleep because we can't setup the wakeup alarm");
-                nextState = kPowerStateAbortSuspend;
-            }
-            else if (!MachineSleep())
-            {
-                SLEEPDLOG_DEBUG("We couldn't sleep because the suspend request failed");
-                nextState = kPowerStateAbortSuspend;
-            }
+            SLEEPDLOG_DEBUG("Kernel resumed");
+            nextState = kPowerStateKernelResume;
         }
         else
         {
-            SLEEPDLOG_DEBUG("We couldn't sleep because charger was connected");
-            nextState = kPowerStateAbortSuspend;
+            SLEEPDLOG_DEBUG("We couldn't sleep because the suspend request failed (wakeup source raced, or platform refused)");
         }
+    }
 
-        // We woke up from sleep.
+    if (nextState != kPowerStateActivityResume)
+    {
+        // Back from the kernel, or never went: either way activities may run again.
         PwrEventThawActivities();
     }
+
+    gForcedSuspend = false;
 
     SLEEPDLOG_DEBUG("Leaving sleep state");
     return nextState;
@@ -881,6 +894,10 @@ StateSleep(void)
 
 /**
  * @brief In this state the "Resume" signal will be broadcasted and the device will go back to the "On" state.
+ *
+ * The next idle check is pushed out by after_resume_idle_ms, as after a real resume: a suspend that a
+ * wakeup source raced is retried at that pace rather than at the idle poll rate, and the source that
+ * raced it gets that long to finish what it woke up for.
  *
  * @retval PowerState Next state.
  */
@@ -894,6 +911,9 @@ StateAbortSuspend(void)
         PwrEventThawActivities();
     }
     SendResume(kResumeAbortSuspend, "resume (suspend aborted)");
+
+    ClockGetTime(&sTimeOnWake);
+    ScheduleIdleCheck(gSleepConfig.after_resume_idle_ms, false);
 
     return kPowerStateOn;
 }
@@ -1141,6 +1161,12 @@ TriggerSuspend(const char *reason, PowerEvent event)
 {
     SLEEPDLOG_DEBUG("%s: state %s", __PRETTY_FUNCTION__, StateToStr(gCurrentStateNode.state));
 
+    if (!suspend_loop)
+    {
+        SLEEPDLOG_DEBUG("Suspend thread not running; ignoring %s", reason);
+        return;
+    }
+
     GSource *source = g_idle_source_new();
     g_source_set_callback(source,
         (GSourceFunc)SuspendStateUpdate, GINT_TO_POINTER(event), NULL);
@@ -1150,12 +1176,24 @@ TriggerSuspend(const char *reason, PowerEvent event)
 }
 
  /**
- * @brief Iterate through the resume state machine
+ * @brief Run the state machine with no event.
+ *
+ * MachineSleep() blocks, so the machine is never left parked in a suspended
+ * state waiting for this; after a kernel resume it drives itself through
+ * KernelResume back to On in the same pass. What remains of this is a
+ * harmless poke from the activityStart path and the RTC alarm callback: in
+ * the On state with no event it is a no-op. The "resume" luna method goes
+ * through ForceResume() instead, which also broadcasts.
  */
 void
 TriggerResume(const char *reason, PowerEvent event)
 {
     SLEEPDLOG_DEBUG("%s: state %s", __PRETTY_FUNCTION__, StateToStr(gCurrentStateNode.state));
+
+    if (!suspend_loop)
+    {
+        return;
+    }
 
     GSource *source = g_idle_source_new();
     g_source_set_callback(source,
@@ -1199,7 +1237,8 @@ bool
 IsSuspended(void)
 {
     SLEEPDLOG_DEBUG("%s: state %s", __PRETTY_FUNCTION__, StateToStr(gCurrentStateNode.state));
-    return (gCurrentStateNode.state == kPowerStateKernelResume);
+    /* the suspend thread is inside MachineSleep() for the whole of StateSleep */
+    return (gCurrentStateNode.state == kPowerStateSleep);
 }
 
 INIT_FUNC(INIT_FUNC_END, SuspendInit);
