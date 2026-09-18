@@ -23,7 +23,7 @@ Three layers, runnable independently or together via `./run-all.sh`.
 
 ## Host tests
 
-    make -C tests/unit                                    # 12 unit tests
+    make -C tests/unit                                    # unit tests
     tests/hardening/static-analysis.sh                    # cppcheck only
     SLEEPD_COMPILE_DB=/path/to/build tests/hardening/static-analysis.sh
     tests/hardening/check-binary.sh /path/to/build/sleepd
@@ -35,6 +35,15 @@ the stub headers, so no webOS sysroot is needed. They pin regressions for:
 - timersource arithmetic after the GTimeVal → gint64 rework, including
   poll-timeout clamping for week-long alarm intervals
 - `wait_alarms_ms` config parsing (pre-fix: read as boolean, never applied)
+- `wait_idle_granularity_ms` config parsing (pre-fix: not read at all)
+- the display-status and charger payload parsers (`status_parse.c`): the
+  subscribe reply vs. event notifications, hub error replies, and the
+  three charger message shapes (pre-fix: the query reply was never parsed)
+
+`test_status_parse` needs json-c. It is built when `pkg-config json-c`
+resolves, or when `JSONC_CFLAGS`/`JSONC_LIBS` are passed to make (for
+instance an OE sysroot's headers plus the host's `libjson-c.so.5`), and
+skipped otherwise.
 
 ## On-device suite
 
