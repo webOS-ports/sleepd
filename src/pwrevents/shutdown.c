@@ -33,6 +33,7 @@
 #include "main.h"
 #include "logging.h"
 #include "machine.h"
+#include "suspend.h"
 #include "init.h"
 #include "json_utils.h"
 
@@ -851,6 +852,9 @@ initiateShutdown(LSHandle *sh, LSMessage *message, void *user_data)
 
     event.id = kShutdownEventShutdownInit;
     event.client = NULL;
+
+    /* from here on the device must stay awake until it is off */
+    SuspendInhibitForShutdown("shutdown initiated");
 
     LSMessageRef(message);
 
