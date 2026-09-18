@@ -19,7 +19,14 @@
 [Unit]
 Description=meta-webos - "%n"
 Requires=ls-hubd.service
-After=ls-hubd.service
+# nyx.target: sleepd opens the nyx system device at startup and aborts if it
+# cannot. com.webos.service.battery: the charger state is queried when that
+# service comes up, so start after it where possible (a later restart of it
+# is handled by the server-status watch either way). luna-displaymanager is
+# wanted, not bound: sleepd re-subscribes to the display state whenever the
+# display manager (re)appears, and must itself survive its restarts.
+After=ls-hubd.service nyx.target com.webos.service.battery.service
+Wants=luna-displaymanager.service
 
 [Service]
 Type=simple
