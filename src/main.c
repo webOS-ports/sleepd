@@ -81,10 +81,14 @@
 static GMainLoop *mainloop = NULL;
 static LSHandle *lsh = NULL, *webos_sh = NULL;
 
-bool ChargerConnected(LSHandle *sh, LSMessage *message,
-                      void *user_data); // defined in machine.c
 bool ChargerStatus(LSHandle *sh, LSMessage *message,
                    void *user_data); // defined in machine.c
+
+/* the signal matches and query below; cancelled and re-issued on every
+ * com.webos.service.battery up event so a restart of batteryd (or of the
+ * hub's match table) cannot leave us listening to nothing */
+static LSMessageToken sChargerConnectedToken = LSMESSAGE_TOKEN_INVALID;
+static LSMessageToken sChargerStatusToken = LSMESSAGE_TOKEN_INVALID;
 
 #define LOG_DOMAIN "SLEEPD-INIT: "
 
@@ -134,6 +138,36 @@ GetNyxSystemDevice(void)
     return nyxSystem;
 }
 
+static void
+cancel_call(LSMessageToken *token)
+{
+    LSError lserror;
+    LSErrorInit(&lserror);
+
+    if (*token != LSMESSAGE_TOKEN_INVALID)
+    {
+        if (!LSCallCancel(lsh, *token, &lserror))
+        {
+            LSErrorFree(&lserror);
+        }
+
+        *token = LSMESSAGE_TOKEN_INVALID;
+    }
+}
+
+/**
+ * Follow com.webos.service.battery: whenever it comes up, (re)subscribe to
+ * its charger signals and ask for the current state.
+ *
+ * batteryd emits chargerConnected ({"connected":bool}) and chargerStatus
+ * ({"type","name","connected","current_mA","message_source"}) on its
+ * /com/palm/power category. The match used to name category "/", which
+ * never matched anything, so chargerIsConnected stayed at its initial
+ * false for the life of the process and suspend_with_charger=false was a
+ * no-op. Both signals are matched now; the query reply, which has a
+ * different shape (USBConnected/DockConnected), is parsed by the same
+ * callback.
+ */
 static gboolean register_batteryd_status_cb(LSHandle *sh, const char *service,
         gboolean connected, void *ctx)
 {
@@ -141,31 +175,44 @@ static gboolean register_batteryd_status_cb(LSHandle *sh, const char *service,
     LSErrorInit(&lserror);
     bool retVal = true;
 
-    if (connected)
+    cancel_call(&sChargerConnectedToken);
+    cancel_call(&sChargerStatusToken);
+
+    if (!connected)
+    {
+        SLEEPDLOG_DEBUG("com.webos.service.battery is down; keeping the last charger state");
+        return true;
+    }
+
+    retVal = LSCall(lsh, "luna://com.palm.lunabus/signal/addmatch",
+                    "{\"category\":\"/com/palm/power\","
+                    "\"method\":\"chargerConnected\"}", ChargerStatus, NULL,
+                    &sChargerConnectedToken, &lserror);
+
+    if (retVal)
+    {
+        retVal = LSCall(lsh, "luna://com.palm.lunabus/signal/addmatch",
+                        "{\"category\":\"/com/palm/power\","
+                        "\"method\":\"chargerStatus\"}", ChargerStatus, NULL,
+                        &sChargerStatusToken, &lserror);
+    }
+
+    if (retVal)
     {
         /*
-         * Register with com.webos.service.battery for events regarding changes in status
-         * to the plug/unplug state of any chargers which may be attached to our
-         * device.
+         * Now that we've got something listening for charger status changes,
+         * request the current state of the charger from com.webos.service.battery
          */
-        retVal = LSCall(lsh, "luna://com.palm.lunabus/signal/addmatch",
-                        "{\"category\":\"/\","
-                        "\"method\":\"chargerConnected\"}", ChargerStatus, NULL, NULL, &lserror);
+        retVal = LSCall(lsh,
+                        "luna://com.webos.service.battery/chargerStatusQuery",
+                        "{}", ChargerStatus, NULL, NULL, &lserror);
+    }
 
-        if (retVal)
-            /*
-             * Now that we've got something listening for charger status changes,
-             * request the current state of the charger from com.webos.service.battery
-             */
-            retVal = LSCall(lsh,
-                            "luna://com.webos.service.battery/chargerStatusQuery",
-                            "{}", ChargerStatus, NULL, NULL, &lserror);
-
-        if (!retVal)
-        {
-            LSErrorPrint(&lserror, stderr);
-            LSErrorFree(&lserror);
-        }
+    if (!retVal)
+    {
+        SLEEPDLOG_WARNING(MSGID_METHOD_REG_ERR, 1, PMLOGKS(ERRTEXT, lserror.message),
+                          "Could not subscribe to charger state");
+        LSErrorFree(&lserror);
     }
 
     return retVal;
