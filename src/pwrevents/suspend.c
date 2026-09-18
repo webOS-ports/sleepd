@@ -49,6 +49,7 @@
 #include "reference_time.h"
 #include "sleepd_config.h"
 #include "sawmill_logger.h"
+#include "status_parse.h"
 #include "nyx/nyx_client.h"
 
 #include <json.h>
@@ -196,7 +197,13 @@ struct timespec sTimeOnWake;
 struct timespec sSuspendRTC;
 struct timespec sWakeRTC;
 
+/*
+ * What com.palm.display last told us. Unknown counts as on: with no display
+ * manager to ask, staying awake is the safe answer.
+ */
 bool gDisplayIsOn = true;
+static LSMessageToken sDisplayStatusToken = LSMESSAGE_TOKEN_INVALID;
+static void *sDisplayServerStatusCookie = NULL;
 
 void SuspendIPCInit(void);
 int SendSuspendRequest(const char *message);
@@ -940,54 +947,120 @@ StateKernelResume(void)
     return _stateResume(kResumeTypeKernel);
 }
 
+/**
+ * @brief A reply or notification on our com.palm.display/control/status subscription.
+ *
+ * The first reply carries "state"; later ones carry "event". Anything that
+ * is not a good reply - a hub error because the display manager went away
+ * or refused the call, returnValue false - ends the subscription, so the
+ * state becomes unknown and is treated as on until the next successful
+ * subscribe (which the server-status watch issues when the display manager
+ * is next seen up).
+ */
 static bool
 DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
 {
-    struct json_object *root_obj;
-    struct json_object *state_obj;
-    struct json_object *event_obj;
-    const char *state;
-    const char *event;
+    const char *payload = LSMessageGetPayload(message);
+    bool was_on = gDisplayIsOn;
 
-    root_obj = json_tokener_parse(LSMessageGetPayload(message));
-    if (!root_obj) {
-        SLEEPDLOG_DEBUG("Failed to parse response from display manager");
-        return true;
-    }
-
-    /* NOTE: When we first call com.palm.display/control/status we will get a response
-     * which has the state field set. Afterwards we only get response with the event field
-     * set. */
-
-    state_obj = json_object_object_get(root_obj, "state");
-    if (state_obj) {
-        state = json_object_get_string(state_obj);
-
-        if (!state)
-            state = "";
-
-        if (strncmp(state, "off", 3) == 0)
-            gDisplayIsOn = false;
-        else if (strncmp(state, "on", 2) == 0 || strncmp(state, "dimmed", 6) == 0)
+    switch (DisplayStatusParse(payload))
+    {
+        case DisplayStatusOn:
             gDisplayIsOn = true;
-    }
+            break;
 
-    event_obj = json_object_object_get(root_obj, "event");
-    if (event_obj) {
-        event = json_object_get_string(event_obj);
-
-        if (!event)
-            event = "";
-
-        if (strncmp(event, "displayOn", 9) == 0)
-            gDisplayIsOn = true;
-        else if (strncmp(event, "displayOff", 10) == 0)
+        case DisplayStatusOff:
             gDisplayIsOn = false;
+            break;
+
+        case DisplayStatusUnchanged:
+            break;
+
+        case DisplayStatusError:
+        default:
+            SLEEPDLOG_WARNING(MSGID_SUBSCRIBE_DISP_MGR_FAIL, 1,
+                              PMLOGKS("payload", payload ? payload : "(null)"),
+                              "Display status subscription failed; assuming the display is on");
+            gDisplayIsOn = true;
+            sDisplayStatusToken = LSMESSAGE_TOKEN_INVALID;
+            break;
     }
 
-    SLEEPDLOG_DEBUG("Display status is now %s", gDisplayIsOn ? "on" : "off");
+    if (was_on != gDisplayIsOn)
+    {
+        SLEEPDLOG_DEBUG("Display status is now %s", gDisplayIsOn ? "on" : "off");
 
-    json_object_put(root_obj);
+        if (!gDisplayIsOn)
+        {
+            /* the idle countdown starts from here, not from the next poll */
+            ScheduleIdleCheck(0, false);
+        }
+    }
+
+    return true;
+}
+
+/**
+ * @brief (Re)subscribe to the display state. The reply to the subscribe call
+ * itself carries the current state, so this doubles as the initial query.
+ */
+static void
+DisplayStatusSubscribe(void)
+{
+    LSError lserror;
+    LSErrorInit(&lserror);
+
+    if (sDisplayStatusToken != LSMESSAGE_TOKEN_INVALID)
+    {
+        if (!LSCallCancel(GetLunaServiceHandle(), sDisplayStatusToken, &lserror))
+        {
+            LSErrorFree(&lserror);
+            LSErrorInit(&lserror);
+        }
+
+        sDisplayStatusToken = LSMESSAGE_TOKEN_INVALID;
+    }
+
+    if (!LSCall(GetLunaServiceHandle(), "luna://com.palm.display/control/status",
+                "{\"subscribe\":true}", DisplayStatusCb, NULL,
+                &sDisplayStatusToken, &lserror))
+    {
+        SLEEPDLOG_WARNING(MSGID_SUBSCRIBE_DISP_MGR_FAIL, 1,
+                          PMLOGKS(ERRTEXT, lserror.message),
+                          "Failed to subscribe for display status updates");
+        LSErrorFree(&lserror);
+        sDisplayStatusToken = LSMESSAGE_TOKEN_INVALID;
+        gDisplayIsOn = true;
+        return;
+    }
+
+    SLEEPDLOG_DEBUG("Subscribed to com.palm.display/control/status");
+}
+
+/**
+ * @brief com.palm.display came up or went down.
+ *
+ * A single subscribe at startup was not enough: if the display manager was
+ * not up yet, or restarted later, the subscription silently died and
+ * gDisplayIsOn kept whatever it last was - on, from initialisation, so
+ * sleepd never suspended again. Subscribe on every up event, and treat a
+ * down display manager as an unknown, i.e. on, display.
+ */
+static bool
+DisplayServerStatusCb(LSHandle *sh, const char *serviceName, bool connected,
+                      void *ctx)
+{
+    SLEEPDLOG_DEBUG("%s is %s", serviceName, connected ? "up" : "down");
+
+    if (connected)
+    {
+        DisplayStatusSubscribe();
+    }
+    else
+    {
+        sDisplayStatusToken = LSMESSAGE_TOKEN_INVALID;
+        gDisplayIsOn = true;
+    }
 
     return true;
 }
@@ -1031,15 +1104,24 @@ SuspendInit(void)
     gCurrentStateNode = kStateMachine[kPowerStateOn];
     if(gSleepConfig.enable_idle_check_thread)
     {
-        /* FIXME Not sure this should be here inside the if. The if didn't exist in OWO */
         LSError lserror;
         LSErrorInit(&lserror);
-        if (!LSCall(GetLunaServiceHandle(), "luna://com.palm.display/control/status",
-                "{\"subscribe\":true}", DisplayStatusCb, NULL, NULL, &lserror))
+
+        /*
+         * The up callback fires right away if the display manager is already
+         * registered, and again after every (re)start of it. The subscribe
+         * itself happens there.
+         */
+        if (!LSRegisterServerStatusEx(GetLunaServiceHandle(), "com.palm.display",
+                                      DisplayServerStatusCb, NULL,
+                                      &sDisplayServerStatusCookie, &lserror))
         {
-            SLEEPDLOG_WARNING(MSGID_SUBSCRIBE_DISP_MGR_FAIL, 0, "Failed to subscribe for display status updates");
+            SLEEPDLOG_WARNING(MSGID_SUBSCRIBE_DISP_MGR_FAIL, 1,
+                              PMLOGKS(ERRTEXT, lserror.message),
+                              "Failed to watch com.palm.display; display assumed on");
             LSErrorFree(&lserror);
         }
+
         if (pthread_create(&suspend_tid, NULL, SuspendThread, NULL))
         {
             SLEEPDLOG_CRITICAL(MSGID_PTHREAD_CREATE_FAIL, 0,
