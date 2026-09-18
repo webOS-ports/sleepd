@@ -50,6 +50,7 @@
 #include "sleepd_config.h"
 #include "sawmill_logger.h"
 #include "status_parse.h"
+#include "sysfs.h"
 #include "nyx/nyx_client.h"
 
 #include <json.h>
@@ -213,6 +214,14 @@ static void *sDisplayServerStatusCookie = NULL;
 /* whether the suspend cycle in progress was started by forceSuspend */
 static bool gForcedSuspend = false;
 
+/*
+ * Set once a shutdown or reboot has started; read from the suspend thread
+ * and the main loop. A suspend that lands in the middle of the shutdown
+ * sequence leaves the device dark with the sequence half done.
+ */
+static gint gShutdownInProgress = 0;
+#define SHUTDOWN_WAKELOCK_NAME "sleepd_shutdown"
+
 void SuspendIPCInit(void);
 int SendSuspendRequest(const char *message);
 int SendPrepareSuspend(const char *message);
@@ -314,6 +323,12 @@ IdleCheck(gpointer ctx)
 
     struct timespec now;
     int next_idle_ms = 0;
+
+    if (SuspendInhibited())
+    {
+        SLEEPDLOG_DEBUG("IdleCheck: shutdown in progress; stopping idle checks");
+        return G_SOURCE_REMOVE;
+    }
 
     SLEEPDLOG_DEBUG("IdleCheck: state %s", StateToStr(gCurrentStateNode.state));
 
@@ -861,6 +876,10 @@ StateSleep(void)
     {
         SLEEPDLOG_DEBUG("We couldn't sleep because charger was connected");
     }
+    else if (SuspendInhibited())
+    {
+        SLEEPDLOG_DEBUG("We couldn't sleep because a shutdown is in progress");
+    }
     else if (!queue_next_wakeup())
     {
         SLEEPDLOG_DEBUG("We couldn't sleep because we can't setup the wakeup alarm");
@@ -1167,6 +1186,12 @@ TriggerSuspend(const char *reason, PowerEvent event)
         return;
     }
 
+    if (SuspendInhibited())
+    {
+        SLEEPDLOG_DEBUG("Shutdown in progress; ignoring suspend trigger (%s)", reason);
+        return;
+    }
+
     GSource *source = g_idle_source_new();
     g_source_set_callback(source,
         (GSourceFunc)SuspendStateUpdate, GINT_TO_POINTER(event), NULL);
@@ -1231,6 +1256,37 @@ ForceResume(const char *reason)
 
     TriggerResume(reason, kPowerEventNone);
     SendResume(kResumeAbortSuspend, (char *) (reason ? reason : "resume requested"));
+}
+
+void
+SuspendInhibitForShutdown(const char *reason)
+{
+    if (!g_atomic_int_compare_and_exchange(&gShutdownInProgress, 0, 1))
+    {
+        return;
+    }
+
+    SLEEPDLOG_DEBUG("Shutdown in progress (%s): suspend inhibited, idle checks stopped",
+                    reason ? reason : "(none)");
+
+    /*
+     * Also veto it in the kernel, for the window between a vote already in
+     * flight and the state write. Never released: the process ends with the
+     * shutdown, and a wakelock whose owner has exited is dropped with it.
+     */
+    if (MachineSupportsWakelocks() &&
+        SysfsWriteString("/sys/power/wake_lock", SHUTDOWN_WAKELOCK_NAME) < 0)
+    {
+        SLEEPDLOG_WARNING(MSGID_WAKE_LOCK_FAILED, 1,
+                          PMLOGKS("wakelock", SHUTDOWN_WAKELOCK_NAME),
+                          "Could not take the shutdown wakelock");
+    }
+}
+
+bool
+SuspendInhibited(void)
+{
+    return g_atomic_int_get(&gShutdownInProgress) != 0;
 }
 
 bool

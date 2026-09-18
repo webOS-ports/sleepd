@@ -52,4 +52,14 @@ bool IsSuspended(void);
  */
 void ForceResume(const char *reason);
 
+/**
+ * @brief A shutdown or reboot has begun: stop the idle checks, refuse every
+ *        suspend from here on, and hold a kernel wakelock until the process
+ *        exits. Idempotent.
+ */
+void SuspendInhibitForShutdown(const char *reason);
+
+/** @brief Whether SuspendInhibitForShutdown() has been called. */
+bool SuspendInhibited(void);
+
 #endif
