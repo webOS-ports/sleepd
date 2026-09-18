@@ -74,9 +74,9 @@ bool _timeout_delete(const char *app_id, const char *key, bool public_bus);
  * Should be called before system suspend.
  *
  * @retval false if failed to setup RTC wakeup while there is scheduled events
- *         waits their time.
+ *         waits their time. "Nothing to arm" is not a failure.
  */
-bool queue_next_wakeup();
+bool queue_next_wakeup(void);
 
 bool timeout_get_next_wakeup(time_t *expiry, gchar **app_id, gchar **key);
 
