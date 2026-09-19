@@ -163,6 +163,7 @@ bool ChargerStatus(LSHandle *sh,
     if (chargerIsConnected != (connected == 1))
     {
         SLEEPDLOG_DEBUG("Charger is now %s", connected ? "connected" : "disconnected");
+        SuspendRetryReset("charger state changed");
     }
     else
     {

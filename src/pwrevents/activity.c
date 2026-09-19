@@ -562,6 +562,8 @@ PwrEventActivityStart(const char *activity_id, int duration_ms)
         TriggerResume("activity", kPowerEventNone);
     }
 
+    SuspendRetryReset("activity started");
+
     retVal = _activity_start(activity_id, duration_ms);
 
     SLEEPDLOG_DEBUG("PwrEventActivityStart() : (%s) for %dms => %s", activity_id,

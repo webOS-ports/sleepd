@@ -514,6 +514,7 @@ static void _rtc_alarm_fired(nyx_device_handle_t handle,
 {
     SLEEPDLOG_DEBUG("RTC alarm fired");
 
+    SuspendRetryReset("RTC alarm fired");
     TriggerResume("rtc", kPowerEventNone);
 
     g_main_context_invoke(GetMainLoopContext(), _rtc_alarm_fired_main, NULL);

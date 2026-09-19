@@ -50,6 +50,7 @@ SleepConfiguration gSleepConfig =
     .wait_suspend_response_ms = 30000,
     .wait_prepare_suspend_ms = 5000,
     .after_resume_idle_ms = 1000,
+    .max_retry_backoff_ms = 30000,
     .wait_alarms_s  = 5,
 
     .suspend_with_charger = 0,
@@ -131,6 +132,8 @@ config_init(void)
                        gSleepConfig.wait_idle_granularity_ms);
         CONFIG_GET_INT(config_file, "suspend", "after_resume_idle_ms",
                        gSleepConfig.after_resume_idle_ms);
+        CONFIG_GET_INT(config_file, "suspend", "max_retry_backoff_ms",
+                       gSleepConfig.max_retry_backoff_ms);
         CONFIG_GET_INT(config_file, "suspend", "wait_suspend_response_ms",
                        gSleepConfig.wait_suspend_response_ms);
         CONFIG_GET_INT(config_file, "suspend", "wait_prepare_suspend_ms",
