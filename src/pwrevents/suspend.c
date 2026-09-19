@@ -222,6 +222,19 @@ static bool gForcedSuspend = false;
 static gint gShutdownInProgress = 0;
 #define SHUTDOWN_WAKELOCK_NAME "sleepd_shutdown"
 
+/*
+ * Liveness of the idle check, for the watchdog on the main loop: when it
+ * last ran (monotonic us), and how long a due idle check may go without
+ * running before the watchdog re-arms it. The suspend thread cannot
+ * dispatch it while it is inside a suspend cycle (a client vote wait, or
+ * MachineSleep() itself), so the watchdog only looks while the machine is
+ * in the On state.
+ */
+static gint64 sIdleCheckLastRunUs = 0;
+#define IDLE_CHECK_WATCHDOG_PERIOD_S 5
+#define IDLE_CHECK_OVERDUE_GRACE_US  (5 * G_USEC_PER_SEC)
+#define IDLE_CHECK_HEARTBEAT_US      (60 * G_USEC_PER_SEC)
+
 void SuspendIPCInit(void);
 int SendSuspendRequest(const char *message);
 int SendPrepareSuspend(const char *message);
@@ -313,6 +326,11 @@ IsDisplayOn(void)
 /**
  * @brief Thread that's scheduled periodically to check if the system has been idle for
  * specified time, to trigger the next state in the state machine.
+ *
+ * This is the one periodic source sleepd's suspend policy hangs off, so it
+ * must never end: every path returns G_SOURCE_CONTINUE, and the timer
+ * re-arms itself from its interval on return. Paths that have nothing to
+ * do simply leave the interval as it is.
  */
 
 gboolean
@@ -320,24 +338,35 @@ IdleCheck(gpointer ctx)
 {
     bool suspend_active;
     bool activity_idle;
+    static gint64 last_heartbeat_us = 0;
 
     struct timespec now;
     int next_idle_ms = 0;
 
+    __atomic_store_n(&sIdleCheckLastRunUs, g_get_monotonic_time(), __ATOMIC_RELAXED);
+
     if (SuspendInhibited())
     {
-        SLEEPDLOG_DEBUG("IdleCheck: shutdown in progress; stopping idle checks");
-        return G_SOURCE_REMOVE;
+        /* keep ticking, harmlessly: the shutdown ends the process */
+        return G_SOURCE_CONTINUE;
     }
 
     /*
      * With the display on there is nothing to decide, and this runs at
-     * 2 Hz for as long as the screen is lit; only narrate the display-off
-     * polls, where the outcome varies.
+     * 2 Hz for as long as the screen is lit: narrate the display-off polls,
+     * where the outcome varies, and otherwise leave a heartbeat once a
+     * minute so a log can still show the idle check is alive.
      */
     if (!IsDisplayOn())
     {
         SLEEPDLOG_DEBUG("IdleCheck: state %s", StateToStr(gCurrentStateNode.state));
+    }
+    else if (g_get_monotonic_time() - last_heartbeat_us >= IDLE_CHECK_HEARTBEAT_US)
+    {
+        last_heartbeat_us = g_get_monotonic_time();
+        SLEEPDLOG_DEBUG("IdleCheck: state %s, display on (heartbeat, every %ds)",
+                        StateToStr(gCurrentStateNode.state),
+                        (int)(IDLE_CHECK_HEARTBEAT_US / G_USEC_PER_SEC));
     }
 
     /*
@@ -448,7 +477,58 @@ resched:
         }
     }
 
-    return TRUE;
+    return G_SOURCE_CONTINUE;
+}
+
+/**
+ * @brief Main-loop watchdog for the idle check.
+ *
+ * Seen on a Pixel 3a: after a burst of refused suspends around a charger
+ * unplug/replug the idle check stopped for good while the rest of the
+ * daemon (timeouts, RTC alarm) kept working - the policy loop was dead and
+ * nothing would ever notice. Whatever loses the source, the recovery is
+ * the same: if it is destroyed, make a new one; if it has been due for
+ * more than the grace period without running while the state machine sits
+ * in On (so nothing legitimately blocks the suspend thread), re-arm it.
+ */
+static gboolean
+IdleCheckWatchdog(gpointer ctx)
+{
+    if (!idle_scheduler || !suspend_loop || SuspendInhibited())
+    {
+        return G_SOURCE_CONTINUE;
+    }
+
+    if (g_source_is_destroyed((GSource *)idle_scheduler))
+    {
+        SLEEPDLOG_WARNING(MSGID_ASSERTION_FAIL, 0,
+                          "Idle check source was destroyed; recreating it");
+
+        g_source_unref((GSource *)idle_scheduler);
+        idle_scheduler = g_timer_source_new(gSleepConfig.wait_idle_ms,
+                                            gSleepConfig.wait_idle_granularity_ms);
+        g_source_set_callback((GSource *)idle_scheduler, IdleCheck, NULL, NULL);
+        g_source_attach((GSource *)idle_scheduler,
+                        g_main_loop_get_context(suspend_loop));
+        return G_SOURCE_CONTINUE;
+    }
+
+    if (gCurrentStateNode.state != kPowerStateOn)
+    {
+        /* inside a suspend cycle: the suspend thread is busy by design */
+        return G_SOURCE_CONTINUE;
+    }
+
+    if (g_timer_source_is_overdue(idle_scheduler, IDLE_CHECK_OVERDUE_GRACE_US) &&
+        __atomic_load_n(&sIdleCheckLastRunUs, __ATOMIC_RELAXED) <
+        g_timer_source_get_expiration_us(idle_scheduler))
+    {
+        SLEEPDLOG_WARNING(MSGID_ASSERTION_FAIL, 0,
+                          "Idle check overdue and not running; re-arming it");
+        ScheduleIdleCheck(0, false);
+    }
+
+    return G_SOURCE_CONTINUE;
 }
 
 static gboolean
@@ -1176,6 +1256,12 @@ SuspendInit(void)
                                "Could not create SuspendThread\n");
             abort();
         }
+
+        /* on the main loop, so it survives whatever befalls the suspend thread's loop */
+        GSource *watchdog = g_timeout_source_new_seconds(IDLE_CHECK_WATCHDOG_PERIOD_S);
+        g_source_set_callback(watchdog, IdleCheckWatchdog, NULL, NULL);
+        g_source_attach(watchdog, GetMainLoopContext());
+        g_source_unref(watchdog);
     }
 
     return 0;
