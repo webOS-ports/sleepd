@@ -263,4 +263,16 @@ g_timer_source_get_interval_ms(GTimerSource *tsource)
     return tsource->interval_ms;
 }
 
+gint64
+g_timer_source_get_expiration_us(GTimerSource *tsource)
+{
+    return tsource->expiration_us;
+}
+
+gboolean
+g_timer_source_is_overdue(GTimerSource *tsource, gint64 grace_us)
+{
+    return g_timer_get_now_us() > tsource->expiration_us + grace_us;
+}
+
 
