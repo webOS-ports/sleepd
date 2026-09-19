@@ -231,6 +231,19 @@ static gint gShutdownInProgress = 0;
  * in the On state.
  */
 static gint64 sIdleCheckLastRunUs = 0;
+
+/*
+ * Retry policy for attempts the kernel refused. sNoSuspendBeforeUs is the
+ * monotonic time before which IdleCheck() will not start an attempt;
+ * sRetryBackoffMs is the delay the next refusal will impose, doubling per
+ * refusal up to max_retry_backoff_ms. Both are reset by SuspendRetryReset()
+ * from whichever thread sees a wake-worthy event. sRefusalStreak counts
+ * consecutive refusals since the last reset or success, and gates the
+ * "suspended" broadcast (see StateSleep()).
+ */
+static gint64 sNoSuspendBeforeUs = 0;
+static gint   sRetryBackoffMs = 0;
+static gint   sRefusalStreak = 0;
 #define IDLE_CHECK_WATCHDOG_PERIOD_S 5
 #define IDLE_CHECK_OVERDUE_GRACE_US  (5 * G_USEC_PER_SEC)
 #define IDLE_CHECK_HEARTBEAT_US      (60 * G_USEC_PER_SEC)
@@ -391,16 +404,13 @@ IdleCheck(gpointer ctx)
         ClockGetTime(&now);
 
         /*
-         * Enforce that the minimum time awake must be at least
-         * after_resume_idle_ms.
+         * Enforce the minimum time awake: after_resume_idle_ms after a
+         * resume, or the current back-off after a refused attempt.
          */
-        struct timespec last_wake;
-        last_wake.tv_sec = sTimeOnWake.tv_sec;
-        last_wake.tv_nsec = sTimeOnWake.tv_nsec;
+        gint64 not_before_us = __atomic_load_n(&sNoSuspendBeforeUs, __ATOMIC_RELAXED);
+        gint64 now_us = g_get_monotonic_time();
 
-        ClockAccumMs(&last_wake, gSleepConfig.after_resume_idle_ms);
-
-        if (!ClockTimeIsGreater(&last_wake, &now))
+        if (now_us >= not_before_us)
         {
             /*
              * Do not sleep if any activity is still active
@@ -453,9 +463,7 @@ IdleCheck(gpointer ctx)
         }
         else
         {
-            struct timespec diff;
-            ClockDiff(&diff, &last_wake, &now);
-            next_idle_ms = ClockGetMs(&diff);
+            next_idle_ms = (int)((not_before_us - now_us + 999) / 1000);
         }
 
 resched:
@@ -529,6 +537,75 @@ IdleCheckWatchdog(gpointer ctx)
     }
 
     return G_SOURCE_CONTINUE;
+}
+
+/**
+ * @brief Hold the next attempt back for delay_ms from now.
+ */
+static void
+SuspendHoldOff(int delay_ms)
+{
+    __atomic_store_n(&sNoSuspendBeforeUs,
+                     g_get_monotonic_time() + (gint64)delay_ms * 1000, __ATOMIC_RELAXED);
+}
+
+void
+SuspendRetryReset(const char *why)
+{
+    int base_ms = gSleepConfig.after_resume_idle_ms;
+    int old = __atomic_exchange_n(&sRetryBackoffMs, base_ms, __ATOMIC_RELAXED);
+
+    __atomic_store_n(&sRefusalStreak, 0, __ATOMIC_RELAXED);
+
+    if (old != base_ms)
+    {
+        SLEEPDLOG_DEBUG("Suspend retry back-off reset to %d ms (%s)", base_ms,
+                        why ? why : "");
+        /* a wake-worthy event also ends the current hold */
+        SuspendHoldOff(base_ms);
+    }
+}
+
+/**
+ * @brief The kernel refused an attempt: hold the next one back for the
+ * current back-off, then double it for the one after, up to the cap.
+ *
+ * Seen on a Pixel 3a on battery: with the fixed 1 s retry the machine ran
+ * 102 refused attempts in eight minutes, and every cycle's broadcasts made
+ * the WiFi stack disconnect and reconnect, which raised exactly the wakeup
+ * sources (vdev_stop, wlan_wow_wl, qcom_rx_wakelock) that refused the next
+ * attempt: a self-sustaining loop.
+ */
+static int
+SuspendRetryBackOff(void)
+{
+    int base_ms = gSleepConfig.after_resume_idle_ms;
+    int cap_ms = gSleepConfig.max_retry_backoff_ms;
+    int delay_ms = __atomic_load_n(&sRetryBackoffMs, __ATOMIC_RELAXED);
+    int next_ms;
+
+    if (delay_ms < base_ms)
+    {
+        delay_ms = base_ms;
+    }
+
+    if (cap_ms < base_ms)
+    {
+        cap_ms = base_ms;
+    }
+
+    if (delay_ms > cap_ms)
+    {
+        delay_ms = cap_ms;
+    }
+
+    next_ms = (delay_ms > cap_ms / 2) ? cap_ms : delay_ms * 2;
+    __atomic_store_n(&sRetryBackoffMs, next_ms, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sRefusalStreak, 1, __ATOMIC_RELAXED);
+
+    SuspendHoldOff(delay_ms);
+
+    return delay_ms;
 }
 
 static gboolean
@@ -929,10 +1006,32 @@ static PowerState
 StateSleep(void)
 {
     int nextState = kPowerStateAbortSuspend;
+    bool refused = false;
 
     PMLOG_TRACE("State Sleep, We will try to go to sleep now");
 
-    SendSuspended("attempting to suspend (We are trying to sleep)");
+    /*
+     * "suspended" is informational ("we are about to try") and has to go out
+     * before the attempt, so a refused attempt cannot take it back. During
+     * a refusal streak - the previous attempt was refused and nothing
+     * wake-worthy has happened since - withhold it: the odds are this one
+     * is refused too, and clients that toggle radios on the suspended/resume
+     * pair are what kept the Pixel 3a's WiFi wakeup sources busy. The abort
+     * "resume" that follows a refusal is still sent, because clients that
+     * acted on prepareSuspend (luna-displaymanager) wait for it; its
+     * resumetype (abort_suspend) already tells it apart from a real wake.
+     * A suspend that does succeed mid-streak is announced by its kernel
+     * "resume" alone; nothing prepares on "suspended".
+     */
+    if (__atomic_load_n(&sRefusalStreak, __ATOMIC_RELAXED) == 0)
+    {
+        SendSuspended("attempting to suspend (We are trying to sleep)");
+    }
+    else
+    {
+        SLEEPDLOG_DEBUG("Not broadcasting \"suspended\": previous attempt was refused (%d in a row)",
+                        __atomic_load_n(&sRefusalStreak, __ATOMIC_RELAXED));
+    }
 
     {
         time_t expiry = 0;
@@ -984,6 +1083,7 @@ StateSleep(void)
         else
         {
             SLEEPDLOG_DEBUG("We couldn't sleep because the suspend request failed (wakeup source raced, or platform refused)");
+            refused = true;
         }
     }
 
@@ -994,6 +1094,13 @@ StateSleep(void)
     }
 
     gForcedSuspend = false;
+
+    if (refused)
+    {
+        int delay_ms = SuspendRetryBackOff();
+        SLEEPDLOG_DEBUG("Next attempt in %d ms (refused %d in a row)", delay_ms,
+                        __atomic_load_n(&sRefusalStreak, __ATOMIC_RELAXED));
+    }
 
     SLEEPDLOG_DEBUG("Leaving sleep state");
     return nextState;
@@ -1020,7 +1127,25 @@ StateAbortSuspend(void)
     SendResume(kResumeAbortSuspend, "resume (suspend aborted)");
 
     ClockGetTime(&sTimeOnWake);
-    ScheduleIdleCheck(gSleepConfig.after_resume_idle_ms, false);
+
+    {
+        /* a refused attempt has already set its back-off hold; any other
+         * abort waits the base interval */
+        gint64 hold_us = __atomic_load_n(&sNoSuspendBeforeUs, __ATOMIC_RELAXED) -
+                         g_get_monotonic_time();
+        int delay_ms = gSleepConfig.after_resume_idle_ms;
+
+        if (hold_us / 1000 > delay_ms)
+        {
+            delay_ms = (int)(hold_us / 1000);
+        }
+        else
+        {
+            SuspendHoldOff(delay_ms);
+        }
+
+        ScheduleIdleCheck(delay_ms, false);
+    }
 
     return kPowerStateOn;
 }
@@ -1054,6 +1179,10 @@ _stateResume(int resumeType)
 #endif
 
     InstrumentOnWake(resumeType);
+
+    /* a real suspend, or an activity: either way the refusal streak is over */
+    SuspendRetryReset(resume_type_descriptions[resumeType]);
+    SuspendHoldOff(gSleepConfig.after_resume_idle_ms);
 
     // if we are inactive in 1s, go back to sleep.
     ScheduleIdleCheck(gSleepConfig.after_resume_idle_ms, false);
@@ -1117,6 +1246,7 @@ DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
     if (was_on != gDisplayIsOn)
     {
         SLEEPDLOG_DEBUG("Display status is now %s", gDisplayIsOn ? "on" : "off");
+        SuspendRetryReset("display state changed");
 
         if (!gDisplayIsOn)
         {
@@ -1218,6 +1348,7 @@ SuspendInit(void)
 
     // initialize wake time.
     ClockGetTime(&sTimeOnWake);
+    sRetryBackoffMs = gSleepConfig.after_resume_idle_ms;
 
     WaitObjectInit(&gWaitSuspendResponse);
     WaitObjectInit(&gWaitPrepareSuspend);

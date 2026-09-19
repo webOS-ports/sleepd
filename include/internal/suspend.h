@@ -62,4 +62,11 @@ void SuspendInhibitForShutdown(const char *reason);
 /** @brief Whether SuspendInhibitForShutdown() has been called. */
 bool SuspendInhibited(void);
 
+/**
+ * @brief A wake-worthy event happened (display or charger change, activity
+ *        start, alarm, ...): drop the suspend-retry back-off to its base
+ *        value and let the next attempt come after after_resume_idle_ms.
+ */
+void SuspendRetryReset(const char *why);
+
 #endif

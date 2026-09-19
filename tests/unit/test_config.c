@@ -34,6 +34,7 @@ static void reset_config(void)
     gSleepConfig.wait_idle_ms = 500;
     gSleepConfig.wait_idle_granularity_ms = 100;
     gSleepConfig.after_resume_idle_ms = 1000;
+    gSleepConfig.max_retry_backoff_ms = 30000;
     gSleepConfig.wait_suspend_response_ms = 30000;
     gSleepConfig.wait_prepare_suspend_ms = 5000;
     gSleepConfig.wait_alarms_s = 5;
@@ -53,6 +54,7 @@ static void test_full_conf_parses(void)
         "wait_idle_ms = 750\n"
         "wait_idle_granularity_ms = 50\n"
         "after_resume_idle_ms = 2000\n"
+        "max_retry_backoff_ms = 45000\n"
         "wait_suspend_response_ms = 15000\n"
         "wait_prepare_suspend_ms = 4000\n"
         "wait_alarms_ms = 7000\n"
@@ -65,6 +67,7 @@ static void test_full_conf_parses(void)
     g_assert_cmpint(gSleepConfig.wait_idle_ms, ==, 750);
     g_assert_cmpint(gSleepConfig.wait_idle_granularity_ms, ==, 50);
     g_assert_cmpint(gSleepConfig.after_resume_idle_ms, ==, 2000);
+    g_assert_cmpint(gSleepConfig.max_retry_backoff_ms, ==, 45000);
     g_assert_cmpint(gSleepConfig.wait_suspend_response_ms, ==, 15000);
     g_assert_cmpint(gSleepConfig.wait_prepare_suspend_ms, ==, 4000);
     g_assert_cmpint(gSleepConfig.wait_alarms_s, ==, 7);   /* ms -> s */
@@ -117,6 +120,7 @@ static void test_missing_conf_keeps_defaults(void)
 
     g_assert_cmpint(config_init(), ==, 0);
     g_assert_cmpint(gSleepConfig.wait_alarms_s, ==, 5);
+    g_assert_cmpint(gSleepConfig.max_retry_backoff_ms, ==, 30000);
     g_assert_false(gSleepConfig.enable_idle_check_thread);
 }
 
