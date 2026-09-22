@@ -49,6 +49,8 @@
 #include "reference_time.h"
 #include "sleepd_config.h"
 #include "sawmill_logger.h"
+#include "status_parse.h"
+#include "sysfs.h"
 #include "nyx/nyx_client.h"
 
 #include <json.h>
@@ -143,16 +145,21 @@ static PowerState StateAbortSuspend(void);
  * "AbortSuspend" state.
  *
  * 5. Sleep: In this state it will first send the "Suspended" signal to everybody. If any activity is active
- * at this point it will go resume by going to the "ActivityResume" state, else it will set the next state to
- * "KernelResume" and let the machine sleep.
+ * at this point it will go resume by going to the "ActivityResume" state. Otherwise it arms the RTC for the
+ * next wakeup timeout and calls MachineSleep(), which blocks for as long as the kernel is suspended. When
+ * it returns true the kernel has been down and is back up: the next state is "KernelResume". When it
+ * returns false the kernel never suspended (a wakeup source raced the write, or the platform refused):
+ * the next state is "AbortSuspend".
  *
- * 6. KernelResume: This is the default state in which the system will be after waking up from sleep. It will
- * broadcast the "Resume" signal , schedule the next IdleCheck sequence and go to the "On" state.
+ * 6. KernelResume: Reached, in the same pass through the state loop, right after the kernel wakes up. It
+ * tells the platform to resume, broadcasts the "Resume" signal, schedules the next IdleCheck
+ * after_resume_idle_ms later and goes to the "On" state.
  *
  * 7. ActivityResume: It will broadcast the "Resume" signal schedule the next IdleCheck sequence and go back
  * to "On" state.
  *
- * 8. AbortSuspend: It will broadcast the "Resume" signal and go back to the "On" state.
+ * 8. AbortSuspend: It will broadcast the "Resume" signal, schedule the next IdleCheck after_resume_idle_ms
+ * later (which is the retry loop for a raced suspend) and go back to the "On" state.
  */
 
 /**
@@ -196,7 +203,50 @@ struct timespec sTimeOnWake;
 struct timespec sSuspendRTC;
 struct timespec sWakeRTC;
 
+/*
+ * What com.palm.display last told us. Unknown counts as on: with no display
+ * manager to ask, staying awake is the safe answer.
+ */
 bool gDisplayIsOn = true;
+static LSMessageToken sDisplayStatusToken = LSMESSAGE_TOKEN_INVALID;
+static void *sDisplayServerStatusCookie = NULL;
+
+/* whether the suspend cycle in progress was started by forceSuspend */
+static bool gForcedSuspend = false;
+
+/*
+ * Set once a shutdown or reboot has started; read from the suspend thread
+ * and the main loop. A suspend that lands in the middle of the shutdown
+ * sequence leaves the device dark with the sequence half done.
+ */
+static gint gShutdownInProgress = 0;
+#define SHUTDOWN_WAKELOCK_NAME "sleepd_shutdown"
+
+/*
+ * Liveness of the idle check, for the watchdog on the main loop: when it
+ * last ran (monotonic us), and how long a due idle check may go without
+ * running before the watchdog re-arms it. The suspend thread cannot
+ * dispatch it while it is inside a suspend cycle (a client vote wait, or
+ * MachineSleep() itself), so the watchdog only looks while the machine is
+ * in the On state.
+ */
+static gint64 sIdleCheckLastRunUs = 0;
+
+/*
+ * Retry policy for attempts the kernel refused. sNoSuspendBeforeUs is the
+ * monotonic time before which IdleCheck() will not start an attempt;
+ * sRetryBackoffMs is the delay the next refusal will impose, doubling per
+ * refusal up to max_retry_backoff_ms. Both are reset by SuspendRetryReset()
+ * from whichever thread sees a wake-worthy event. sRefusalStreak counts
+ * consecutive refusals since the last reset or success, and gates the
+ * "suspended" broadcast (see StateSleep()).
+ */
+static gint64 sNoSuspendBeforeUs = 0;
+static gint   sRetryBackoffMs = 0;
+static gint   sRefusalStreak = 0;
+#define IDLE_CHECK_WATCHDOG_PERIOD_S 5
+#define IDLE_CHECK_OVERDUE_GRACE_US  (5 * G_USEC_PER_SEC)
+#define IDLE_CHECK_HEARTBEAT_US      (60 * G_USEC_PER_SEC)
 
 void SuspendIPCInit(void);
 int SendSuspendRequest(const char *message);
@@ -289,6 +339,11 @@ IsDisplayOn(void)
 /**
  * @brief Thread that's scheduled periodically to check if the system has been idle for
  * specified time, to trigger the next state in the state machine.
+ *
+ * This is the one periodic source sleepd's suspend policy hangs off, so it
+ * must never end: every path returns G_SOURCE_CONTINUE, and the timer
+ * re-arms itself from its interval on return. Paths that have nothing to
+ * do simply leave the interval as it is.
  */
 
 gboolean
@@ -296,16 +351,51 @@ IdleCheck(gpointer ctx)
 {
     bool suspend_active;
     bool activity_idle;
+    static gint64 last_heartbeat_us = 0;
 
     struct timespec now;
     int next_idle_ms = 0;
 
-    if (gCurrentStateNode.state == kPowerStateKernelResume) {
-        SLEEPDLOG_DEBUG("Not rescheduling idle check cause we're in sleep mode");
-        return TRUE;
+    __atomic_store_n(&sIdleCheckLastRunUs, g_get_monotonic_time(), __ATOMIC_RELAXED);
+
+    if (SuspendInhibited())
+    {
+        /* keep ticking, harmlessly: the shutdown ends the process */
+        return G_SOURCE_CONTINUE;
     }
 
-    SLEEPDLOG_DEBUG("IdleCheck: state %s", StateToStr(gCurrentStateNode.state));
+    /*
+     * With the display on there is nothing to decide, and this runs at
+     * 2 Hz for as long as the screen is lit: narrate the display-off polls,
+     * where the outcome varies, and otherwise leave a heartbeat once a
+     * minute so a log can still show the idle check is alive.
+     */
+    if (!IsDisplayOn())
+    {
+        SLEEPDLOG_DEBUG("IdleCheck: state %s", StateToStr(gCurrentStateNode.state));
+    }
+    else if (g_get_monotonic_time() - last_heartbeat_us >= IDLE_CHECK_HEARTBEAT_US)
+    {
+        last_heartbeat_us = g_get_monotonic_time();
+        SLEEPDLOG_DEBUG("IdleCheck: state %s, display on (heartbeat, every %ds)",
+                        StateToStr(gCurrentStateNode.state),
+                        (int)(IDLE_CHECK_HEARTBEAT_US / G_USEC_PER_SEC));
+    }
+
+    /*
+     * Drop activities that have outlived their duration whatever the display
+     * is doing. Each one holds a kernel wakelock that _activity_stop_activity()
+     * is the only thing that releases, and the sole call to this used to sit
+     * inside the display-off branch below - so with the display on, or merely
+     * believed to be on, a one-second activity kept its wakelock indefinitely.
+     *
+     * Observed on a PinePhone Pro: com.webos.service.alarm.timeout_fired asks
+     * for TIMEOUT_KEEP_ALIVE_MS (1000ms) and its wakelock was still held
+     * minutes later, released only when the next timeout fired and
+     * _activity_start() stopped the previous instance by name.
+     */
+    ClockGetTime(&now);
+    PwrEventActivityRemoveExpired(&now);
 
     if (!IsDisplayOn())
     {
@@ -314,16 +404,13 @@ IdleCheck(gpointer ctx)
         ClockGetTime(&now);
 
         /*
-         * Enforce that the minimum time awake must be at least
-         * after_resume_idle_ms.
+         * Enforce the minimum time awake: after_resume_idle_ms after a
+         * resume, or the current back-off after a refused attempt.
          */
-        struct timespec last_wake;
-        last_wake.tv_sec = sTimeOnWake.tv_sec;
-        last_wake.tv_nsec = sTimeOnWake.tv_nsec;
+        gint64 not_before_us = __atomic_load_n(&sNoSuspendBeforeUs, __ATOMIC_RELAXED);
+        gint64 now_us = g_get_monotonic_time();
 
-        ClockAccumMs(&last_wake, gSleepConfig.after_resume_idle_ms);
-
-        if (!ClockTimeIsGreater(&last_wake, &now))
+        if (now_us >= not_before_us)
         {
             /*
              * Do not sleep if any activity is still active
@@ -376,9 +463,7 @@ IdleCheck(gpointer ctx)
         }
         else
         {
-            struct timespec diff;
-            ClockDiff(&diff, &last_wake, &now);
-            next_idle_ms = ClockGetMs(&diff);
+            next_idle_ms = (int)((not_before_us - now_us + 999) / 1000);
         }
 
 resched:
@@ -400,7 +485,127 @@ resched:
         }
     }
 
-    return TRUE;
+    return G_SOURCE_CONTINUE;
+}
+
+/**
+ * @brief Main-loop watchdog for the idle check.
+ *
+ * Seen on a Pixel 3a: after a burst of refused suspends around a charger
+ * unplug/replug the idle check stopped for good while the rest of the
+ * daemon (timeouts, RTC alarm) kept working - the policy loop was dead and
+ * nothing would ever notice. Whatever loses the source, the recovery is
+ * the same: if it is destroyed, make a new one; if it has been due for
+ * more than the grace period without running while the state machine sits
+ * in On (so nothing legitimately blocks the suspend thread), re-arm it.
+ */
+static gboolean
+IdleCheckWatchdog(gpointer ctx)
+{
+    if (!idle_scheduler || !suspend_loop || SuspendInhibited())
+    {
+        return G_SOURCE_CONTINUE;
+    }
+
+    if (g_source_is_destroyed((GSource *)idle_scheduler))
+    {
+        SLEEPDLOG_WARNING(MSGID_ASSERTION_FAIL, 0,
+                          "Idle check source was destroyed; recreating it");
+
+        g_source_unref((GSource *)idle_scheduler);
+        idle_scheduler = g_timer_source_new(gSleepConfig.wait_idle_ms,
+                                            gSleepConfig.wait_idle_granularity_ms);
+        g_source_set_callback((GSource *)idle_scheduler, IdleCheck, NULL, NULL);
+        g_source_attach((GSource *)idle_scheduler,
+                        g_main_loop_get_context(suspend_loop));
+        return G_SOURCE_CONTINUE;
+    }
+
+    if (gCurrentStateNode.state != kPowerStateOn)
+    {
+        /* inside a suspend cycle: the suspend thread is busy by design */
+        return G_SOURCE_CONTINUE;
+    }
+
+    if (g_timer_source_is_overdue(idle_scheduler, IDLE_CHECK_OVERDUE_GRACE_US) &&
+        __atomic_load_n(&sIdleCheckLastRunUs, __ATOMIC_RELAXED) <
+        g_timer_source_get_expiration_us(idle_scheduler))
+    {
+        SLEEPDLOG_WARNING(MSGID_ASSERTION_FAIL, 0,
+                          "Idle check overdue and not running; re-arming it");
+        ScheduleIdleCheck(0, false);
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
+/**
+ * @brief Hold the next attempt back for delay_ms from now.
+ */
+static void
+SuspendHoldOff(int delay_ms)
+{
+    __atomic_store_n(&sNoSuspendBeforeUs,
+                     g_get_monotonic_time() + (gint64)delay_ms * 1000, __ATOMIC_RELAXED);
+}
+
+void
+SuspendRetryReset(const char *why)
+{
+    int base_ms = gSleepConfig.after_resume_idle_ms;
+    int old = __atomic_exchange_n(&sRetryBackoffMs, base_ms, __ATOMIC_RELAXED);
+
+    __atomic_store_n(&sRefusalStreak, 0, __ATOMIC_RELAXED);
+
+    if (old != base_ms)
+    {
+        SLEEPDLOG_DEBUG("Suspend retry back-off reset to %d ms (%s)", base_ms,
+                        why ? why : "");
+        /* a wake-worthy event also ends the current hold */
+        SuspendHoldOff(base_ms);
+    }
+}
+
+/**
+ * @brief The kernel refused an attempt: hold the next one back for the
+ * current back-off, then double it for the one after, up to the cap.
+ *
+ * Seen on a Pixel 3a on battery: with the fixed 1 s retry the machine ran
+ * 102 refused attempts in eight minutes, and every cycle's broadcasts made
+ * the WiFi stack disconnect and reconnect, which raised exactly the wakeup
+ * sources (vdev_stop, wlan_wow_wl, qcom_rx_wakelock) that refused the next
+ * attempt: a self-sustaining loop.
+ */
+static int
+SuspendRetryBackOff(void)
+{
+    int base_ms = gSleepConfig.after_resume_idle_ms;
+    int cap_ms = gSleepConfig.max_retry_backoff_ms;
+    int delay_ms = __atomic_load_n(&sRetryBackoffMs, __ATOMIC_RELAXED);
+    int next_ms;
+
+    if (delay_ms < base_ms)
+    {
+        delay_ms = base_ms;
+    }
+
+    if (cap_ms < base_ms)
+    {
+        cap_ms = base_ms;
+    }
+
+    if (delay_ms > cap_ms)
+    {
+        delay_ms = cap_ms;
+    }
+
+    next_ms = (delay_ms > cap_ms / 2) ? cap_ms : delay_ms * 2;
+    __atomic_store_n(&sRetryBackoffMs, next_ms, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sRefusalStreak, 1, __ATOMIC_RELAXED);
+
+    SuspendHoldOff(delay_ms);
+
+    return delay_ms;
 }
 
 static gboolean
@@ -420,12 +625,6 @@ SuspendStateUpdate(PowerEvent power_event)
         if (next_state >= 0 && next_state < kPowerStateLast)
         {
             gCurrentStateNode = kStateMachine[next_state];
-            /* When suspend cycle is done we're breaking the loop here and waiting for the
-            * upper stack to trigger the resume cycle */
-            if (next_state == kPowerStateKernelResume)
-            {
-                break;
-            }
         }
     }
     while (next_state != kPowerStateLast);
@@ -492,6 +691,12 @@ StateOn(void)
             break;
     }
 
+    /*
+     * gSuspendEvent is consumed here, so later states cannot tell a forced
+     * cycle from an idle one by looking at it; remember it for StateSleep,
+     * where forceSuspend is meant to override the charger and activity vetoes.
+     */
+    gForcedSuspend = (gSuspendEvent == kPowerEventForceSuspend);
     gSuspendEvent = kPowerEventNone;
 
     return next_state;
@@ -783,8 +988,16 @@ CheckActivitiesActive(struct timespec *now)
 
 /**
  * @brief In this state it will first send the "Suspended" signal to everybody. If any activity is active
- * at this point it will go resume by going to the "ActivityResume" state, else it will set the next state
- * to "KernelResume" and let the machine sleep.
+ * at this point it will go resume by going to the "ActivityResume" state, else it arms the wakeup alarm and
+ * lets the machine sleep.
+ *
+ * MachineSleep() blocks until the kernel has suspended and resumed again, so on a true return the device
+ * has already been through a full suspend cycle and the next state is "KernelResume". On a false return
+ * the kernel never went down - a wakeup source raced the suspend write, or the platform refused - and the
+ * next state is "AbortSuspend", which schedules the retry.
+ *
+ * A forced suspend (forceSuspend over luna) skips the charger and activity vetoes, as its documentation
+ * has always promised; it does not skip the client vote, the wakeup alarm, or kernel wakelocks.
  *
  * @retval PowerState Next state.
  */
@@ -792,12 +1005,33 @@ CheckActivitiesActive(struct timespec *now)
 static PowerState
 StateSleep(void)
 {
-    int nextState =
-        kPowerStateKernelResume; // assume a normal sleep ended by some kernel event
+    int nextState = kPowerStateAbortSuspend;
+    bool refused = false;
 
     PMLOG_TRACE("State Sleep, We will try to go to sleep now");
 
-    SendSuspended("attempting to suspend (We are trying to sleep)");
+    /*
+     * "suspended" is informational ("we are about to try") and has to go out
+     * before the attempt, so a refused attempt cannot take it back. During
+     * a refusal streak - the previous attempt was refused and nothing
+     * wake-worthy has happened since - withhold it: the odds are this one
+     * is refused too, and clients that toggle radios on the suspended/resume
+     * pair are what kept the Pixel 3a's WiFi wakeup sources busy. The abort
+     * "resume" that follows a refusal is still sent, because clients that
+     * acted on prepareSuspend (luna-displaymanager) wait for it; its
+     * resumetype (abort_suspend) already tells it apart from a real wake.
+     * A suspend that does succeed mid-streak is announced by its kernel
+     * "resume" alone; nothing prepares on "suspended".
+     */
+    if (__atomic_load_n(&sRefusalStreak, __ATOMIC_RELAXED) == 0)
+    {
+        SendSuspended("attempting to suspend (We are trying to sleep)");
+    }
+    else
+    {
+        SLEEPDLOG_DEBUG("Not broadcasting \"suspended\": previous attempt was refused (%d in a row)",
+                        __atomic_load_n(&sRefusalStreak, __ATOMIC_RELAXED));
+    }
 
     {
         time_t expiry = 0;
@@ -819,38 +1053,53 @@ StateSleep(void)
     timesaver_save();
 
     // if any activities were started, abort suspend.
-    if (gSuspendEvent != kPowerEventForceSuspend &&
-            !CheckActivitiesActive(&sTimeOnSuspended))
+    if (!gForcedSuspend && !CheckActivitiesActive(&sTimeOnSuspended))
     {
         SLEEPDLOG_DEBUG("aborting sleep because of current activity");
         PwrEventActivityPrintFrom(&sTimeOnSuspended);
         nextState = kPowerStateActivityResume;
     }
-
+    else if (!gForcedSuspend && !MachineCanSleep())
+    {
+        SLEEPDLOG_DEBUG("We couldn't sleep because charger was connected");
+    }
+    else if (SuspendInhibited())
+    {
+        SLEEPDLOG_DEBUG("We couldn't sleep because a shutdown is in progress");
+    }
+    else if (!queue_next_wakeup())
+    {
+        SLEEPDLOG_DEBUG("We couldn't sleep because we can't setup the wakeup alarm");
+    }
     else
     {
-        SLEEPDLOG_DEBUG("Going to sleep now");
-        if (MachineCanSleep())
+        SLEEPDLOG_DEBUG("Going to sleep now%s", gForcedSuspend ? " (forced)" : "");
+
+        if (MachineSleep())
         {
-            if (!queue_next_wakeup())
-            {
-                SLEEPDLOG_DEBUG("We couldn't sleep because we can't setup the wakeup alarm");
-                nextState = kPowerStateAbortSuspend;
-            }
-            else if (!MachineSleep())
-            {
-                SLEEPDLOG_DEBUG("We couldn't sleep because the suspend request failed");
-                nextState = kPowerStateAbortSuspend;
-            }
+            SLEEPDLOG_DEBUG("Kernel resumed");
+            nextState = kPowerStateKernelResume;
         }
         else
         {
-            SLEEPDLOG_DEBUG("We couldn't sleep because charger was connected");
-            nextState = kPowerStateAbortSuspend;
+            SLEEPDLOG_DEBUG("We couldn't sleep because the suspend request failed (wakeup source raced, or platform refused)");
+            refused = true;
         }
+    }
 
-        // We woke up from sleep.
+    if (nextState != kPowerStateActivityResume)
+    {
+        // Back from the kernel, or never went: either way activities may run again.
         PwrEventThawActivities();
+    }
+
+    gForcedSuspend = false;
+
+    if (refused)
+    {
+        int delay_ms = SuspendRetryBackOff();
+        SLEEPDLOG_DEBUG("Next attempt in %d ms (refused %d in a row)", delay_ms,
+                        __atomic_load_n(&sRefusalStreak, __ATOMIC_RELAXED));
     }
 
     SLEEPDLOG_DEBUG("Leaving sleep state");
@@ -859,6 +1108,10 @@ StateSleep(void)
 
 /**
  * @brief In this state the "Resume" signal will be broadcasted and the device will go back to the "On" state.
+ *
+ * The next idle check is pushed out by after_resume_idle_ms, as after a real resume: a suspend that a
+ * wakeup source raced is retried at that pace rather than at the idle poll rate, and the source that
+ * raced it gets that long to finish what it woke up for.
  *
  * @retval PowerState Next state.
  */
@@ -872,6 +1125,27 @@ StateAbortSuspend(void)
         PwrEventThawActivities();
     }
     SendResume(kResumeAbortSuspend, "resume (suspend aborted)");
+
+    ClockGetTime(&sTimeOnWake);
+
+    {
+        /* a refused attempt has already set its back-off hold; any other
+         * abort waits the base interval */
+        gint64 hold_us = __atomic_load_n(&sNoSuspendBeforeUs, __ATOMIC_RELAXED) -
+                         g_get_monotonic_time();
+        int delay_ms = gSleepConfig.after_resume_idle_ms;
+
+        if (hold_us / 1000 > delay_ms)
+        {
+            delay_ms = (int)(hold_us / 1000);
+        }
+        else
+        {
+            SuspendHoldOff(delay_ms);
+        }
+
+        ScheduleIdleCheck(delay_ms, false);
+    }
 
     return kPowerStateOn;
 }
@@ -906,6 +1180,10 @@ _stateResume(int resumeType)
 
     InstrumentOnWake(resumeType);
 
+    /* a real suspend, or an activity: either way the refusal streak is over */
+    SuspendRetryReset(resume_type_descriptions[resumeType]);
+    SuspendHoldOff(gSleepConfig.after_resume_idle_ms);
+
     // if we are inactive in 1s, go back to sleep.
     ScheduleIdleCheck(gSleepConfig.after_resume_idle_ms, false);
 
@@ -925,54 +1203,122 @@ StateKernelResume(void)
     return _stateResume(kResumeTypeKernel);
 }
 
+/**
+ * @brief A reply or notification on our com.palm.display/control/status subscription.
+ *
+ * The first reply carries "state"; later ones carry "event". Anything that
+ * is not a good reply - a hub error because the display manager went away
+ * or refused the call, returnValue false - ends the subscription, so the
+ * state becomes unknown and is treated as on until the next successful
+ * subscribe (which the server-status watch issues when the display manager
+ * is next seen up).
+ */
 static bool
 DisplayStatusCb(LSHandle *handle, LSMessage *message, void *user_data)
 {
-    struct json_object *root_obj;
-    struct json_object *state_obj;
-    struct json_object *event_obj;
-    const char *state;
-    const char *event;
+    const char *payload = LSMessageGetPayload(message);
+    bool was_on = gDisplayIsOn;
 
-    root_obj = json_tokener_parse(LSMessageGetPayload(message));
-    if (!root_obj) {
-        SLEEPDLOG_DEBUG("Failed to parse response from display manager");
-        return true;
-    }
-
-    /* NOTE: When we first call com.palm.display/control/status we will get a response
-     * which has the state field set. Afterwards we only get response with the event field
-     * set. */
-
-    state_obj = json_object_object_get(root_obj, "state");
-    if (state_obj) {
-        state = json_object_get_string(state_obj);
-
-        if (!state)
-            state = "";
-
-        if (strncmp(state, "off", 3) == 0)
-            gDisplayIsOn = false;
-        else if (strncmp(state, "on", 2) == 0 || strncmp(state, "dimmed", 6) == 0)
+    switch (DisplayStatusParse(payload))
+    {
+        case DisplayStatusOn:
             gDisplayIsOn = true;
-    }
+            break;
 
-    event_obj = json_object_object_get(root_obj, "event");
-    if (event_obj) {
-        event = json_object_get_string(event_obj);
-
-        if (!event)
-            event = "";
-
-        if (strncmp(event, "displayOn", 9) == 0)
-            gDisplayIsOn = true;
-        else if (strncmp(event, "displayOff", 10) == 0)
+        case DisplayStatusOff:
             gDisplayIsOn = false;
+            break;
+
+        case DisplayStatusUnchanged:
+            break;
+
+        case DisplayStatusError:
+        default:
+            /* the payload is JSON itself, so it cannot go into a PmLog kv */
+            SLEEPDLOG_WARNING(MSGID_SUBSCRIBE_DISP_MGR_FAIL, 0,
+                              "Display status subscription ended; assuming the display is on");
+            SLEEPDLOG_DEBUG("Display status reply was: %s", payload ? payload : "(null)");
+            gDisplayIsOn = true;
+            sDisplayStatusToken = LSMESSAGE_TOKEN_INVALID;
+            break;
     }
 
-    SLEEPDLOG_DEBUG("Display status is now %s", gDisplayIsOn ? "on" : "off");
+    if (was_on != gDisplayIsOn)
+    {
+        SLEEPDLOG_DEBUG("Display status is now %s", gDisplayIsOn ? "on" : "off");
+        SuspendRetryReset("display state changed");
 
-    json_object_put(root_obj);
+        if (!gDisplayIsOn)
+        {
+            /* the idle countdown starts from here, not from the next poll */
+            ScheduleIdleCheck(0, false);
+        }
+    }
+
+    return true;
+}
+
+/**
+ * @brief (Re)subscribe to the display state. The reply to the subscribe call
+ * itself carries the current state, so this doubles as the initial query.
+ */
+static void
+DisplayStatusSubscribe(void)
+{
+    LSError lserror;
+    LSErrorInit(&lserror);
+
+    if (sDisplayStatusToken != LSMESSAGE_TOKEN_INVALID)
+    {
+        if (!LSCallCancel(GetLunaServiceHandle(), sDisplayStatusToken, &lserror))
+        {
+            LSErrorFree(&lserror);
+            LSErrorInit(&lserror);
+        }
+
+        sDisplayStatusToken = LSMESSAGE_TOKEN_INVALID;
+    }
+
+    if (!LSCall(GetLunaServiceHandle(), "luna://com.palm.display/control/status",
+                "{\"subscribe\":true}", DisplayStatusCb, NULL,
+                &sDisplayStatusToken, &lserror))
+    {
+        SLEEPDLOG_WARNING(MSGID_SUBSCRIBE_DISP_MGR_FAIL, 1,
+                          PMLOGKS(ERRTEXT, lserror.message),
+                          "Failed to subscribe for display status updates");
+        LSErrorFree(&lserror);
+        sDisplayStatusToken = LSMESSAGE_TOKEN_INVALID;
+        gDisplayIsOn = true;
+        return;
+    }
+
+    SLEEPDLOG_DEBUG("Subscribed to com.palm.display/control/status");
+}
+
+/**
+ * @brief com.palm.display came up or went down.
+ *
+ * A single subscribe at startup was not enough: if the display manager was
+ * not up yet, or restarted later, the subscription silently died and
+ * gDisplayIsOn kept whatever it last was - on, from initialisation, so
+ * sleepd never suspended again. Subscribe on every up event, and treat a
+ * down display manager as an unknown, i.e. on, display.
+ */
+static bool
+DisplayServerStatusCb(LSHandle *sh, const char *serviceName, bool connected,
+                      void *ctx)
+{
+    SLEEPDLOG_DEBUG("%s is %s", serviceName, connected ? "up" : "down");
+
+    if (connected)
+    {
+        DisplayStatusSubscribe();
+    }
+    else
+    {
+        sDisplayStatusToken = LSMESSAGE_TOKEN_INVALID;
+        gDisplayIsOn = true;
+    }
 
     return true;
 }
@@ -1002,6 +1348,7 @@ SuspendInit(void)
 
     // initialize wake time.
     ClockGetTime(&sTimeOnWake);
+    sRetryBackoffMs = gSleepConfig.after_resume_idle_ms;
 
     WaitObjectInit(&gWaitSuspendResponse);
     WaitObjectInit(&gWaitPrepareSuspend);
@@ -1016,21 +1363,36 @@ SuspendInit(void)
     gCurrentStateNode = kStateMachine[kPowerStateOn];
     if(gSleepConfig.enable_idle_check_thread)
     {
-        /* FIXME Not sure this should be here inside the if. The if didn't exist in OWO */
         LSError lserror;
         LSErrorInit(&lserror);
-        if (!LSCall(GetLunaServiceHandle(), "luna://com.palm.display/control/status",
-                "{\"subscribe\":true}", DisplayStatusCb, NULL, NULL, &lserror))
+
+        /*
+         * The up callback fires right away if the display manager is already
+         * registered, and again after every (re)start of it. The subscribe
+         * itself happens there.
+         */
+        if (!LSRegisterServerStatusEx(GetLunaServiceHandle(), "com.palm.display",
+                                      DisplayServerStatusCb, NULL,
+                                      &sDisplayServerStatusCookie, &lserror))
         {
-            SLEEPDLOG_WARNING(MSGID_SUBSCRIBE_DISP_MGR_FAIL, 0, "Failed to subscribe for display status updates");
+            SLEEPDLOG_WARNING(MSGID_SUBSCRIBE_DISP_MGR_FAIL, 1,
+                              PMLOGKS(ERRTEXT, lserror.message),
+                              "Failed to watch com.palm.display; display assumed on");
             LSErrorFree(&lserror);
         }
+
         if (pthread_create(&suspend_tid, NULL, SuspendThread, NULL))
         {
             SLEEPDLOG_CRITICAL(MSGID_PTHREAD_CREATE_FAIL, 0,
                                "Could not create SuspendThread\n");
             abort();
         }
+
+        /* on the main loop, so it survives whatever befalls the suspend thread's loop */
+        GSource *watchdog = g_timeout_source_new_seconds(IDLE_CHECK_WATCHDOG_PERIOD_S);
+        g_source_set_callback(watchdog, IdleCheckWatchdog, NULL, NULL);
+        g_source_attach(watchdog, GetMainLoopContext());
+        g_source_unref(watchdog);
     }
 
     return 0;
@@ -1044,6 +1406,18 @@ TriggerSuspend(const char *reason, PowerEvent event)
 {
     SLEEPDLOG_DEBUG("%s: state %s", __PRETTY_FUNCTION__, StateToStr(gCurrentStateNode.state));
 
+    if (!suspend_loop)
+    {
+        SLEEPDLOG_DEBUG("Suspend thread not running; ignoring %s", reason);
+        return;
+    }
+
+    if (SuspendInhibited())
+    {
+        SLEEPDLOG_DEBUG("Shutdown in progress; ignoring suspend trigger (%s)", reason);
+        return;
+    }
+
     GSource *source = g_idle_source_new();
     g_source_set_callback(source,
         (GSourceFunc)SuspendStateUpdate, GINT_TO_POINTER(event), NULL);
@@ -1053,12 +1427,35 @@ TriggerSuspend(const char *reason, PowerEvent event)
 }
 
  /**
- * @brief Iterate through the resume state machine
+ * @brief Run the state machine with no event.
+ *
+ * MachineSleep() blocks, so the machine is never left parked in a suspended
+ * state waiting for this; after a kernel resume it drives itself through
+ * KernelResume back to On in the same pass. What remains of this is a
+ * harmless poke from the activityStart path and the RTC alarm callback: in
+ * the On state with no event it is a no-op. The "resume" luna method goes
+ * through ForceResume() instead, which also broadcasts.
  */
 void
 TriggerResume(const char *reason, PowerEvent event)
 {
-    SLEEPDLOG_DEBUG("%s: state %s", __PRETTY_FUNCTION__, StateToStr(gCurrentStateNode.state));
+    if (!suspend_loop)
+    {
+        return;
+    }
+
+    /*
+     * In the On state with no event the machine has nothing to do, and
+     * every activityStart lands here: skip the four-line no-op cycle it
+     * would otherwise log.
+     */
+    if (event == kPowerEventNone && gCurrentStateNode.state == kPowerStateOn)
+    {
+        return;
+    }
+
+    SLEEPDLOG_DEBUG("%s: state %s (%s)", __PRETTY_FUNCTION__,
+                    StateToStr(gCurrentStateNode.state), reason ? reason : "");
 
     GSource *source = g_idle_source_new();
     g_source_set_callback(source,
@@ -1073,11 +1470,68 @@ TriggerResume(const char *reason, PowerEvent event)
  *
  * @return True, if device is currently suspended, False otherwise.
  */
+/**
+ * @brief Resume on request even when the kernel never went down.
+ *
+ * A client that entered a suspended state on prepareSuspend is waiting for the
+ * resume signal to leave it again. If the suspend is still pending, or was
+ * aborted, IsSuspended() is false and the old code answered the resume request
+ * with an error and broadcast nothing - leaving that client stuck in a state
+ * only the resume signal can end. luna-displaymanager is exactly such a client:
+ * its DisplayOffSuspended records where to restore to and waits, so the display
+ * stayed off and the power key did nothing at all until the process restarted.
+ *
+ * Drive the state machine as a normal resume does, and broadcast regardless, so
+ * asking to wake up always results in subscribers being told the device is
+ * awake.
+ */
+void
+ForceResume(const char *reason)
+{
+    SLEEPDLOG_DEBUG("%s: state %s, reason %s", __PRETTY_FUNCTION__,
+                    StateToStr(gCurrentStateNode.state), reason ? reason : "(none)");
+
+    TriggerResume(reason, kPowerEventNone);
+    SendResume(kResumeAbortSuspend, (char *) (reason ? reason : "resume requested"));
+}
+
+void
+SuspendInhibitForShutdown(const char *reason)
+{
+    if (!g_atomic_int_compare_and_exchange(&gShutdownInProgress, 0, 1))
+    {
+        return;
+    }
+
+    SLEEPDLOG_DEBUG("Shutdown in progress (%s): suspend inhibited, idle checks stopped",
+                    reason ? reason : "(none)");
+
+    /*
+     * Also veto it in the kernel, for the window between a vote already in
+     * flight and the state write. Never released: the process ends with the
+     * shutdown, and a wakelock whose owner has exited is dropped with it.
+     */
+    if (MachineSupportsWakelocks() &&
+        SysfsWriteString("/sys/power/wake_lock", SHUTDOWN_WAKELOCK_NAME) < 0)
+    {
+        SLEEPDLOG_WARNING(MSGID_WAKE_LOCK_FAILED, 1,
+                          PMLOGKS("wakelock", SHUTDOWN_WAKELOCK_NAME),
+                          "Could not take the shutdown wakelock");
+    }
+}
+
+bool
+SuspendInhibited(void)
+{
+    return g_atomic_int_get(&gShutdownInProgress) != 0;
+}
+
 bool
 IsSuspended(void)
 {
     SLEEPDLOG_DEBUG("%s: state %s", __PRETTY_FUNCTION__, StateToStr(gCurrentStateNode.state));
-    return (gCurrentStateNode.state == kPowerStateKernelResume);
+    /* the suspend thread is inside MachineSleep() for the whole of StateSleep */
+    return (gCurrentStateNode.state == kPowerStateSleep);
 }
 
 INIT_FUNC(INIT_FUNC_END, SuspendInit);

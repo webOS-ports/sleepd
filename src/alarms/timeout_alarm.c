@@ -46,6 +46,7 @@
 #include "init.h"
 #include "timesaver.h"
 #include "suspend.h"
+#include "nyx/nyx_client.h"
 
 #define LOG_DOMAIN "ALARMS-TIMEOUT: "
 
@@ -493,33 +494,121 @@ timeout_get_next_wakeup(time_t *expiry, gchar **app_id, gchar **key)
     return ret;
 }
 
+static gboolean
+_rtc_alarm_fired_main(gpointer data)
+{
+    _update_timeouts();
+    return G_SOURCE_REMOVE;
+}
+
+/**
+* @brief Called by nyx when the RTC wakeup alarm fires.
+*
+* The nyx module may call this from its own watch on the default main
+* context or from a thread of its own, so nothing is touched here directly:
+* the suspend state machine is poked (a no-op unless it is mid-cycle) and the
+* timeout scan is queued onto sleepd's main loop.
+*/
+static void _rtc_alarm_fired(nyx_device_handle_t handle,
+                             nyx_callback_status_t status, void *data)
+{
+    SLEEPDLOG_DEBUG("RTC alarm fired");
+
+    SuspendRetryReset("RTC alarm fired");
+    TriggerResume("rtc", kPowerEventNone);
+
+    g_main_context_invoke(GetMainLoopContext(), _rtc_alarm_fired_main, NULL);
+}
+
+/**
+* @brief Arm (or with expiry 0, clear) the RTC wakeup alarm for a timeout.
+*
+* Timeout expiries are reference_time() values: CLOCK_BOOTTIME plus an
+* offset that update_reference_time() keeps equal to the wall clock, so in
+* practice they are epoch seconds - but only as of the last adjustment.
+* The nyx system modules take an absolute UTC wall-clock time (they run it
+* through gmtime_r() for RTC_WKALM_SET, or a CLOCK_REALTIME_ALARM timerfd),
+* so convert through "seconds from now" rather than trusting the offset.
+*
+* @retval true  the alarm is armed (or cleared), or the platform has no RTC
+*               alarm at all - in which case the device may still sleep, it
+*               just will not wake for this timeout
+* @retval false the platform has an RTC alarm and refused to arm it
+*/
+static bool
+_rtc_alarm_arm(time_t expiry, time_t now)
+{
+    static bool warned_unsupported = false;
+    time_t wall = 0;
+    nyx_error_t error;
+
+    if (expiry)
+    {
+        wall = time(NULL) + (expiry - now);
+    }
+
+    error = nyx_system_set_alarm(GetNyxSystemDevice(), wall,
+                                 expiry ? _rtc_alarm_fired : NULL, NULL);
+
+    if (error == NYX_ERROR_NONE)
+    {
+        if (expiry)
+        {
+            SLEEPDLOG_DEBUG("RTC wakeup alarm armed for %ld (in %ld s)", (long)wall,
+                            (long)(expiry - now));
+        }
+
+        return true;
+    }
+
+    if (error == NYX_ERROR_NOT_IMPLEMENTED)
+    {
+        if (!warned_unsupported)
+        {
+            SLEEPDLOG_WARNING(MSGID_RTC_ERR, 0,
+                              "nyx system module has no RTC alarm; wakeup timeouts cannot wake the device");
+            warned_unsupported = true;
+        }
+
+        return true;
+    }
+
+    SLEEPDLOG_WARNING(MSGID_RTC_ERR, 1, PMLOGKFV(ERRCODE, "%d", error),
+                      "Failed to set RTC wakeup alarm");
+    return false;
+}
+
 /**
 * @brief Queues both a RTC alarm for wakeup timeouts
 *        and a timer for non-wakeup timeouts.
 *
-* @param set_callback_fn
-*  If set_callback_fn is set to true, the wakeup timer source is (re)armed
-*  for the next wakeup-capable timeout.
-*  It is set to true as long as device is awake, and false when
-*  the device suspends.
+* The RTC alarm is what wakes a suspended device for a wakeup=1 timeout;
+* it is (re)armed on every call, for the earliest such timeout, and cleared
+* when none is pending. The timer source covers the same timeout while the
+* device is awake, and every non-wakeup timeout.
 *
 * The non-wakeup timeout timer is necessary so that
 * these timeouts do not wake the device when they fire.
 * Case 1: non-wakeup timeout expires when device is awake (trivial).
 * Case 2: non-wakeup timeout expires when device is asleep.
 *     On resume, we will check to see if any alarms are expired and fire them.
+*
+* @retval false if the alarm table could not be read, or a wakeup timeout is
+*         pending and the RTC alarm could not be armed for it: the device
+*         must not suspend, it would not wake in time.
 */
 static bool
-_queue_next_timeout(bool set_callback_fn)
+_queue_next_timeout(void)
 {
     int rc;
     char **table;
     int noRows, noCols;
     char *zErrMsg;
+    bool rtc_ok;
 
     time_t rtc_expiry = 0;
     time_t timer_expiry = 0;
-    time_t now = reference_time(); // TODO wall clock? or RTC?
+    time_t now = reference_time();
 
     g_return_val_if_fail(timeout_db != NULL, false);
 
@@ -545,37 +634,36 @@ _queue_next_timeout(bool set_callback_fn)
 
     if (!noRows)
     {
-        nyx_system_set_alarm(GetNyxSystemDevice(), 0, NULL, NULL);
+        rtc_ok = _rtc_alarm_arm(0, now);
     }
     else
     {
-        if(set_callback_fn)
+        rtc_expiry = atol(table[ noCols ]);
+        long wakeInSeconds = rtc_expiry - now;
+
+        rtc_ok = _rtc_alarm_arm(rtc_expiry, now);
+
+        /*
+         * Floor at one second, never zero. A zero interval makes the
+         * GTimerSource expire the moment it is re-armed, so dispatch()
+         * re-arms it to "now" and it is immediately ready again - a busy
+         * loop that ran _timer_check() ~40000 times a second and burned
+         * ~25% of a CPU core for as long as an overdue row existed.
+         * The alarm is already late; a second more costs nothing.
+         */
+        if (wakeInSeconds < 1)
         {
-            rtc_expiry = atol(table[ noCols ]);
-            long wakeInSeconds = rtc_expiry - now;
-
-            /*
-             * Floor at one second, never zero. A zero interval makes the
-             * GTimerSource expire the moment it is re-armed, so dispatch()
-             * re-arms it to "now" and it is immediately ready again - a busy
-             * loop that ran _timer_check() ~40000 times a second and burned
-             * ~25% of a CPU core for as long as an overdue row existed.
-             * The alarm is already late; a second more costs nothing.
-             */
-            if (wakeInSeconds < 1)
-            {
-                wakeInSeconds = 1;
-            }
-            else if(wakeInSeconds > MAX_WAKEUP_SECS)
-            {
-                wakeInSeconds = MAX_WAKEUP_SECS;
-            }
-
-            g_timer_source_set_interval_seconds(sTimerCheck, wakeInSeconds, true);
-
-            sqlite3_free_table(table);
-            return true;
+            wakeInSeconds = 1;
         }
+        else if(wakeInSeconds > MAX_WAKEUP_SECS)
+        {
+            wakeInSeconds = MAX_WAKEUP_SECS;
+        }
+
+        g_timer_source_set_interval_seconds(sTimerCheck, wakeInSeconds, true);
+
+        sqlite3_free_table(table);
+        return rtc_ok;
     }
 
     sqlite3_free_table(table);
@@ -624,12 +712,24 @@ _queue_next_timeout(bool set_callback_fn)
     }
 
     sqlite3_free_table(table);
-    return true;
+    return rtc_ok;
 }
 
-bool queue_next_wakeup()
+/**
+* @brief Arm the RTC for the next wakeup timeout, ahead of a suspend.
+*
+* With RTC alarms disabled there is no timeout table and nothing to arm;
+* that is not a reason to stay awake.
+*/
+bool queue_next_wakeup(void)
 {
-    return _queue_next_timeout(true);
+    if (gSleepConfig.disable_rtc_alarms || !timeout_db)
+    {
+        SLEEPDLOG_DEBUG("No timeout database; nothing to arm before suspend");
+        return true;
+    }
+
+    return _queue_next_timeout();
 }
 
 /**
@@ -649,7 +749,7 @@ _update_timeouts(void)
 
     _expire_timeouts();
 
-    _queue_next_timeout(true);
+    _queue_next_timeout();
 }
 
 void _timeout_create(_AlarmTimeout *timeout,

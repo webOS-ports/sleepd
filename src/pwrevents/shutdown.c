@@ -33,6 +33,7 @@
 #include "main.h"
 #include "logging.h"
 #include "machine.h"
+#include "suspend.h"
 #include "init.h"
 #include "json_utils.h"
 
@@ -156,7 +157,7 @@ static bool state_shutdown_services_process(ShutdownEvent *event,
         ShutdownState *next);
 static bool state_shutdown_action(ShutdownEvent *event, ShutdownState *next);
 
-static void send_shutdown_apps();
+static void send_shutdown_apps(const char *payload);
 static void send_shutdown_services();
 
 static bool shutdown_timeout(void *data);
@@ -183,6 +184,20 @@ LSHandle                 *shutdown_sh = NULL;
 
 guint shutdown_apps_timeout_id = 0;
 GTimer  *shutdown_timer = NULL;
+
+/*
+ * machineOff / machineReboot in flight: the applications have been told and
+ * we are waiting for their acks before forcing the action.
+ */
+typedef enum
+{
+    kForcedActionNone = 0,
+    kForcedActionShutdown,
+    kForcedActionReboot,
+} ForcedAction;
+
+static ForcedAction sForcedAction = kForcedActionNone;
+static char *sForcedReason = NULL;
 
 /**
  * @defgroup ShutdownProcess    Shutdown Process
@@ -471,9 +486,13 @@ shutdown_state_dispatch(ShutdownEvent *event)
 
 /**
  * @brief Broadcast the "shutdownApplications" signal
+ *
+ * The payload is empty for a graceful initiate (the caller decides what
+ * follows), and {"reason","action"} for a forced machineOff/machineReboot,
+ * so a listener can tell a shutdown from a reboot.
  */
 static void
-send_shutdown_apps()
+send_shutdown_apps(const char *payload)
 {
     bool retVal;
     LSError lserror;
@@ -481,7 +500,7 @@ send_shutdown_apps()
 
     retVal = LSSignalSend(GetLunaServiceHandle(),
                           "luna://com.palm.sleep/shutdown/shutdownApplications",
-                          "{}", &lserror);
+                          payload, &lserror);
 
     if (!retVal)
     {
@@ -494,7 +513,7 @@ send_shutdown_apps()
 
     retVal = LSSignalSend(GetWebosLunaServiceHandle(),
                           "luna://com.webos.service.power/shutdown/shutdownApplications",
-                          "{}", &lserror);
+                          payload, &lserror);
 
     if (!retVal)
     {
@@ -637,9 +656,55 @@ state_shutdown_apps(ShutdownEvent *event, ShutdownState *next)
     shutdown_apps_timeout_id =
         g_timeout_add_seconds(15, (GSourceFunc)shutdown_timeout, NULL);
 
-    send_shutdown_apps();
+    if (sForcedAction != kForcedActionNone)
+    {
+        struct json_object *payload = json_object_new_object();
+
+        json_object_object_add(payload, "reason",
+                               json_object_new_string(sForcedReason ? sForcedReason : ""));
+        json_object_object_add(payload, "action",
+                               json_object_new_string(sForcedAction == kForcedActionReboot ?
+                                                      "reboot" : "shutdown"));
+        send_shutdown_apps(json_object_to_json_string(payload));
+        json_object_put(payload);
+    }
+    else
+    {
+        send_shutdown_apps("{}");
+    }
 
     return true;
+}
+
+/**
+ * @brief The applications have acked (or the wait timed out): do what
+ * machineOff / machineReboot asked for.
+ *
+ * The state machine is put back to idle here rather than through *next,
+ * because shutdown_state_dispatch() aborts on a state that goes backwards.
+ * If the nyx call returns at all, sleepd is simply ready for the next one.
+ */
+static void
+forced_action_run(void)
+{
+    ForcedAction action = sForcedAction;
+    char *reason = sForcedReason;
+
+    sForcedAction = kForcedActionNone;
+    sForcedReason = NULL;
+
+    gCurrentState = &kStateMachine[kPowerShutdownNone];
+
+    if (action == kForcedActionReboot)
+    {
+        MachineForceReboot(reason);
+    }
+    else
+    {
+        MachineForceShutdown(reason);
+    }
+
+    g_free(reason);
 }
 
 /**
@@ -683,6 +748,13 @@ state_shutdown_apps_process(ShutdownEvent *event, ShutdownState *next)
 
     int readiness = shutdown_apps_ready();
 
+    /* a forced action is not a vote: a NACK only means "not ready", and
+     * the timeout bounds how long the applications get */
+    if (sForcedAction != kForcedActionNone && readiness < 0)
+    {
+        readiness = 0;
+    }
+
     if (readiness > 0 || timeout)
     {
         if (timeout)
@@ -692,7 +764,22 @@ state_shutdown_apps_process(ShutdownEvent *event, ShutdownState *next)
 
         client_list_print(sClientList->applications);
 
-        g_source_remove(shutdown_apps_timeout_id);
+        if (!timeout)
+        {
+            g_source_remove(shutdown_apps_timeout_id);
+        }
+
+        shutdown_apps_timeout_id = 0;
+
+        if (sForcedAction != kForcedActionNone)
+        {
+            SLEEPDLOG_DEBUG("Shutdown apps done @ %fs; forcing %s",
+                            g_timer_elapsed(shutdown_timer, NULL),
+                            sForcedAction == kForcedActionReboot ? "reboot" : "shutdown");
+            forced_action_run();
+            *next = kPowerShutdownNone;
+            return false;
+        }
 
         *next = kPowerShutdownServices;
         return true;
@@ -851,6 +938,9 @@ initiateShutdown(LSHandle *sh, LSMessage *message, void *user_data)
 
     event.id = kShutdownEventShutdownInit;
     event.client = NULL;
+
+    /* from here on the device must stay awake until it is off */
+    SuspendInhibitForShutdown("shutdown initiated");
 
     LSMessageRef(message);
 
@@ -1136,6 +1226,63 @@ end:
 }
 
 /**
+ * @brief Carry out machineOff / machineReboot.
+ *
+ * These used to go straight to the nyx call, so nothing on the bus learned
+ * that the device was going down: the shutdownApplications signal was only
+ * ever sent by the graceful initiate sequence, and a shutdown screen that
+ * starts on that signal never showed for a reboot from the power menu.
+ *
+ * With applications registered, tell them first - the same signal, with
+ * the reason and the action in the payload - and wait for their acks,
+ * bounded by the shutdown-apps timeout, before forcing. With none
+ * registered, or while an initiate sequence is already in flight, force
+ * immediately as before. The services step is not involved: this is still
+ * the forced path.
+ */
+static void
+force_machine(LSHandle *sh, LSMessage *message, ForcedAction action,
+              const char *reason)
+{
+    /* stop the idle checks now, not only when the nyx call is made */
+    SuspendInhibitForShutdown(reason);
+
+    if (gCurrentState->state != kPowerShutdownNone ||
+        sForcedAction != kForcedActionNone ||
+        !sClientList || g_hash_table_size(sClientList->applications) == 0)
+    {
+        if (action == kForcedActionReboot)
+        {
+            MachineForceReboot(reason);
+        }
+        else
+        {
+            MachineForceShutdown(reason);
+        }
+
+        LSMessageReplySuccess(sh, message);
+        return;
+    }
+
+    SLEEPDLOG_DEBUG("Forced %s (%s): notifying %u shutdown application client(s) first",
+                    action == kForcedActionReboot ? "reboot" : "shutdown", reason,
+                    g_hash_table_size(sClientList->applications));
+
+    sForcedAction = action;
+    sForcedReason = g_strdup(reason);
+
+    /* the caller gets its reply now; the action follows the acks */
+    LSMessageReplySuccess(sh, message);
+
+    ShutdownEvent event;
+    event.id = kShutdownEventShutdownInit;
+    event.client = NULL;
+
+    g_timer_start(shutdown_timer);
+    shutdown_state_dispatch(&event);
+}
+
+/**
  * @brief Shutdown the machine forcefully
  *
  * @param sh
@@ -1162,8 +1309,7 @@ machineOff(LSHandle *sh, LSMessage *message,
         goto cleanup;
     }
 
-    MachineForceShutdown(reason);
-    LSMessageReplySuccess(sh, message);
+    force_machine(sh, message, kForcedActionShutdown, reason);
 
 cleanup:
 
@@ -1203,8 +1349,7 @@ machineReboot(LSHandle *sh, LSMessage *message,
         goto cleanup;
     }
 
-    MachineForceReboot(reason);
-    LSMessageReplySuccess(sh, message);
+    force_machine(sh, message, kForcedActionReboot, reason);
 
 cleanup:
 

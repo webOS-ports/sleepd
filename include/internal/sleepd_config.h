@@ -32,6 +32,7 @@ typedef struct
     int wait_suspend_response_ms;
     int wait_prepare_suspend_ms;
     int after_resume_idle_ms;
+    int max_retry_backoff_ms;
     int wait_alarms_s;
 
     bool suspend_with_charger;

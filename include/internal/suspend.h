@@ -46,4 +46,27 @@ bool GetSuspendSettings(LSHandle *sh, LSMessage *message, void *ctx);
 int com_palm_suspend_lunabus_init(void);
 bool IsSuspended(void);
 
+/**
+ * @brief Unwind the suspend path on request, whether or not the kernel has
+ *        actually gone down yet, and tell subscribers the device is awake.
+ */
+void ForceResume(const char *reason);
+
+/**
+ * @brief A shutdown or reboot has begun: stop the idle checks, refuse every
+ *        suspend from here on, and hold a kernel wakelock until the process
+ *        exits. Idempotent.
+ */
+void SuspendInhibitForShutdown(const char *reason);
+
+/** @brief Whether SuspendInhibitForShutdown() has been called. */
+bool SuspendInhibited(void);
+
+/**
+ * @brief A wake-worthy event happened (display or charger change, activity
+ *        start, alarm, ...): drop the suspend-retry back-off to its base
+ *        value and let the next attempt come after after_resume_idle_ms.
+ */
+void SuspendRetryReset(const char *why);
+
 #endif

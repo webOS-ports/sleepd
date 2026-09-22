@@ -18,6 +18,13 @@ CC        ?= cc
 GLIB_CFLAGS := $(shell pkg-config --cflags glib-2.0)
 GLIB_LIBS   := $(shell pkg-config --libs glib-2.0)
 
+# status_parse.c needs json-c. Taken from pkg-config when the host has the
+# development files; override JSONC_CFLAGS/JSONC_LIBS to point elsewhere
+# (for instance an OE sysroot's headers plus the host's libjson-c.so.5).
+# Without either, that one test is skipped and the rest still run.
+JSONC_CFLAGS ?= $(shell pkg-config --cflags json-c 2>/dev/null)
+JSONC_LIBS   ?= $(shell pkg-config --libs json-c 2>/dev/null)
+
 CFLAGS  += -std=gnu99 -g -O1 -Wall -Werror=implicit-function-declaration \
            -fsanitize=address,undefined -fno-omit-frame-pointer \
            -Istubs -I$(TOP)/include/internal $(GLIB_CFLAGS)
@@ -31,6 +38,9 @@ CONFIG_DEFS := \
     -DWEBOS_INSTALL_LOCALSTATEDIR='"/tmp/sleepd-test-var"'
 
 TESTS := $(BUILDDIR)/test_wait $(BUILDDIR)/test_timersource $(BUILDDIR)/test_config
+ifneq ($(strip $(JSONC_LIBS)),)
+TESTS += $(BUILDDIR)/test_status_parse
+endif
 
 all: check
 
@@ -47,6 +57,9 @@ $(BUILDDIR)/test_timersource: test_timersource.c $(TOP)/src/utils/timersource.c 
 
 $(BUILDDIR)/test_config: test_config.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(CONFIG_DEFS) $(LDFLAGS) -o $@ $< $(LDLIBS)
+
+$(BUILDDIR)/test_status_parse: test_status_parse.c $(TOP)/src/utils/status_parse.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(JSONC_CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS) $(JSONC_LIBS)
 
 check: $(TESTS)
 	@fail=0; \

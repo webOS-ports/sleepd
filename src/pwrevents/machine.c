@@ -39,6 +39,7 @@
 #include "logging.h"
 #include "suspend.h"
 #include "sleepd_config.h"
+#include "status_parse.h"
 
 /**
  * Holds the current state of whether or not we're being supplied with power from a charger of any sort.
@@ -108,6 +109,8 @@ MachineForceShutdown(const char *reason)
     SLEEPDLOG_INFO(MSGID_FRC_SHUTDOWN, 1, PMLOGKS("Reason", reason),
                    "Pwrevents shutting down system");
 
+    SuspendInhibitForShutdown(reason);
+
     if (gSleepConfig.fasthalt)
     {
         nyx_system_shutdown(GetNyxSystemDevice(), NYX_SYSTEM_EMERG_SHUTDOWN, reason);
@@ -124,6 +127,8 @@ MachineForceReboot(const char *reason)
     SLEEPDLOG_INFO(MSGID_FRC_REBOOT, 1, PMLOGKS("Reason", reason),
                    "Pwrevents rebooting system");
 
+    SuspendInhibitForShutdown(reason);
+
     if (gSleepConfig.fasthalt)
     {
         nyx_system_reboot(GetNyxSystemDevice(), NYX_SYSTEM_EMERG_SHUTDOWN, reason);
@@ -134,26 +139,38 @@ MachineForceReboot(const char *reason)
     }
 }
 
+/**
+ * @brief Track charger presence from com.webos.service.battery.
+ *
+ * Fed by the chargerConnected and chargerStatus signals and by the reply to
+ * chargerStatusQuery; see ChargerStatusParse() for the three shapes. A
+ * payload that says nothing about the charger (an error reply, an addmatch
+ * acknowledgement) leaves the state untouched.
+ */
 bool ChargerStatus(LSHandle *sh,
                    LSMessage *message, void *user_data)
 {
-    struct json_object *object;
-    object = json_tokener_parse(LSMessageGetPayload(message));
+    const char *payload = LSMessageGetPayload(message);
+    int connected = ChargerStatusParse(payload);
 
-
-    if (object)
+    if (connected < 0)
     {
-        if (json_object_object_get(object, "connected"))
-        {
-            chargerIsConnected = json_object_get_boolean(json_object_object_get(object,
-                                 "connected"));
-        }
+        SLEEPDLOG_DEBUG("Charger payload without charger state ignored: %s",
+                        payload ? payload : "(null)");
+        return true;
     }
 
-    if (object)
+    if (chargerIsConnected != (connected == 1))
     {
-        json_object_put(object);
+        SLEEPDLOG_DEBUG("Charger is now %s", connected ? "connected" : "disconnected");
+        SuspendRetryReset("charger state changed");
     }
+    else
+    {
+        SLEEPDLOG_DEBUG("Charger still %s", connected ? "connected" : "disconnected");
+    }
+
+    chargerIsConnected = (connected == 1);
 
     return true;
 }

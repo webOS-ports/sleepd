@@ -137,6 +137,33 @@ static void test_set_interval_rearms(void)
     g_source_unref((GSource *)ts);
 }
 
+/*
+ * The idle-check watchdog asks whether a source has been due for longer
+ * than a grace period without being re-armed; a freshly armed source is
+ * not overdue, one whose expiry is well in the past is.
+ */
+static void test_overdue(void)
+{
+    GTimerSource *ts = g_timer_source_new(100, 0);
+
+    g_assert_false(g_timer_source_is_overdue(ts, 0));
+    g_assert_false(g_timer_source_is_overdue(ts, 5 * G_USEC_PER_SEC));
+    g_assert_cmpint(g_timer_source_get_expiration_us(ts), >, g_get_monotonic_time());
+
+    /* re-arm exactly as dispatch() does, then let it go stale */
+    g_timer_source_set_interval(ts, 1, TRUE);
+    g_usleep(20 * 1000);
+    g_assert_true(g_timer_source_is_overdue(ts, 0));
+    g_assert_true(g_timer_source_is_overdue(ts, 10 * 1000));
+    g_assert_false(g_timer_source_is_overdue(ts, 5 * G_USEC_PER_SEC));
+
+    /* re-arming clears it */
+    g_timer_source_set_interval(ts, 100, TRUE);
+    g_assert_false(g_timer_source_is_overdue(ts, 0));
+
+    g_source_unref((GSource *)ts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -147,5 +174,7 @@ int main(int argc, char **argv)
     g_test_add_func("/timersource/seconds-constructor", test_seconds_constructor);
     g_test_add_func("/timersource/huge-interval-clamps", test_huge_interval_clamps);
     g_test_add_func("/timersource/set-interval-rearms", test_set_interval_rearms);
+    g_test_add_func("/timersource/overdue", test_overdue);
+
     return g_test_run();
 }
