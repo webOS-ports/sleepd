@@ -10,6 +10,7 @@
     ],
     "com.webos.service.alarm": [
         "activity.query",
+        "application.launcher",
         "activity.operation",
         "activity.wakeup",
         "batteryd.management",
@@ -19,6 +20,7 @@
     ],
     "com.webos.service.power": [
         "activity.query",
+        "application.launcher",
         "activity.operation",
         "activity.wakeup",
         "batteryd.management",
